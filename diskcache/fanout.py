@@ -5,6 +5,7 @@ import functools
 import itertools as it
 import operator
 import os.path as op
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -407,6 +408,59 @@ class FanoutCache:
         """
         warnings = (shard.check(fix, retry) for shard in self._shards)
         return functools.reduce(operator.iadd, warnings, [])
+
+    def backup(self, destination=None, retry=False):
+        """Back up every shard directory for later rollback.
+
+        :param str destination: backup directory path (default: sibling
+            directory named ``<cache-directory>.backup-<timestamp>``)
+        :param bool retry: retry if database timeout occurs (default False)
+        :return: path of the backup directory
+
+        """
+        for shard in self._shards:
+            sql = shard._sql_retry if retry else shard._sql
+            sql('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
+
+        if destination is None:
+            stamp = time.strftime('%Y%m%d-%H%M%S')
+            destination = '%s.backup-%s' % (
+                self._directory.rstrip(op.sep),
+                stamp,
+            )
+
+        return shutil.copytree(self._directory, destination)
+
+    def migrate_codec(self, dry_run=True, backup_dir=None, retry=False):
+        """Preview or perform codec migration across every shard.
+
+        See :meth:`diskcache.Cache.migrate_codec` for semantics. Failures in
+        any shard are collected; failed entries are left untouched and never
+        rewritten as empty values.
+
+        :param bool dry_run: only report what would migrate (default True)
+        :param str backup_dir: when given, back up the cache before writing
+        :param bool retry: retry if database timeout occurs (default False)
+        :return: merged MigrationReport across all shards
+
+        """
+        from .codec import MigrationReport
+
+        if backup_dir is not None:
+            self.backup(backup_dir, retry=retry)
+
+        merged = MigrationReport()
+
+        for shard in self._shards:
+            report = shard.migrate_codec(
+                dry_run=dry_run, backup_dir=None, retry=retry
+            )
+            merged.scanned += report.scanned
+            merged.migrated += report.migrated
+            merged.skipped += report.skipped
+            merged.failures.extend(report.failures)
+
+        return merged
 
     def expire(self, retry=False):
         """Remove expired items from cache.

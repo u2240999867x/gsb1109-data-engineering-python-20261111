@@ -11,6 +11,7 @@ import os
 import os.path as op
 import pickle
 import pickletools
+import shutil
 import sqlite3
 import struct
 import tempfile
@@ -2018,6 +2019,185 @@ class Cache:
                         )
 
             return warns
+
+    def backup(self, destination=None, retry=False):
+        """Back up the cache directory for later rollback.
+
+        A WAL checkpoint is performed first so the copy contains all
+        committed writes. The cache is never cleared or rewritten; this
+        method only copies files.
+
+        :param str destination: backup directory path (default: sibling
+            directory named ``<cache-directory>.backup-<timestamp>``)
+        :param bool retry: retry if database timeout occurs (default False)
+        :return: path of the backup directory
+        :raises FileExistsError: if `destination` already exists
+
+        """
+        sql = self._sql_retry if retry else self._sql
+        sql('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
+
+        if destination is None:
+            stamp = time.strftime('%Y%m%d-%H%M%S')
+            destination = '%s.backup-%s' % (
+                self._directory.rstrip(op.sep),
+                stamp,
+            )
+
+        return shutil.copytree(self._directory, destination)
+
+    def migrate_codec(self, dry_run=True, backup_dir=None, retry=False):
+        """Preview or perform an explicit codec migration.
+
+        Entries stored in legacy or previously registered codec formats are
+        decoded with their registered codec and re-encoded with the primary
+        codec of the cache disk. Entries using native storage (raw scalars,
+        bytes, text, or file-like values) and entries already in the target
+        format are skipped.
+
+        The original cache is never cleared. Entries that cannot be decoded
+        (including unknown format versions) or whose values cannot be
+        represented by the target codec are recorded in the report and left
+        untouched. Failures are never rewritten as empty or default values.
+
+        Run a dry run first to preview the entries that cannot be
+        represented. Pass `backup_dir` (or call :meth:`backup`) to keep a
+        copy of the original cache as a rollback point before a real run.
+
+        Requires the cache to use a versioned disk such as
+        :class:`diskcache.VersionedDisk`.
+
+        :param bool dry_run: only report what would migrate (default True)
+        :param str backup_dir: when given, back up the cache before writing
+        :param bool retry: retry if database timeout occurs (default False)
+        :return: MigrationReport describing scanned, migrated, skipped, and
+            failed entries
+        :raises TypeError: when the cache disk has no codec registry
+
+        """
+        from .codec import (
+            DecodeError,
+            MigrationReport,
+            UnknownFormatError,
+            decode_frame,
+            is_framed,
+        )
+
+        disk = self._disk
+        registry = getattr(disk, 'registry', None)
+        codec = getattr(disk, 'codec', None)
+
+        if registry is None or codec is None:
+            raise TypeError(
+                'cache disk %r does not support codec migration;'
+                ' use diskcache.VersionedDisk' % type(disk).__name__
+            )
+
+        if backup_dir is not None:
+            self.backup(backup_dir, retry=retry)
+
+        target_format = codec.format
+        target_version = codec.VERSION
+        report = MigrationReport()
+        select = (
+            'SELECT rowid, key, raw, mode, filename, value FROM Cache'
+            ' WHERE rowid > ? ORDER BY rowid LIMIT ?'
+        )
+        rowid = 0
+
+        while True:
+            rows = self._sql(select, (rowid, 100)).fetchall()
+
+            if not rows:
+                break
+
+            for (
+                rowid,
+                db_key,
+                raw,
+                mode,
+                filename,
+                db_value,
+            ) in rows:
+                report.scanned += 1
+
+                try:
+                    key = disk.get(db_key, raw)
+                except Exception as exc:  # pylint: disable=broad-except
+                    report.add_failure(rowid, None, 'key', exc)
+                    continue
+
+                if mode != MODE_PICKLE:
+                    # Native storage (raw, binary, text) has no codec frame.
+                    report.skipped += 1
+                    continue
+
+                source_format = None
+                source_version = None
+                try:
+                    if db_value is None:
+                        with open(
+                            op.join(self._directory, filename), 'rb'
+                        ) as reader:
+                            blob = reader.read()
+                    else:
+                        blob = bytes(db_value)
+
+                    if is_framed(blob):
+                        source_format, source_version, payload = decode_frame(
+                            blob
+                        )
+                        if (
+                            source_format == target_format
+                            and source_version == target_version
+                        ):
+                            report.skipped += 1
+                            continue
+                        source_codec = registry.get(
+                            source_format, source_version
+                        )
+                        value = source_codec.decode(payload)
+                    else:
+                        value = registry.legacy_codec().decode(blob)
+                except (UnknownFormatError, DecodeError) as exc:
+                    report.add_failure(rowid, key, 'decode', exc)
+                    continue
+                except Exception as exc:  # pylint: disable=broad-except
+                    failure = DecodeError(
+                        key=key,
+                        format=source_format,
+                        version=source_version,
+                        reason=str(exc),
+                    )
+                    report.add_failure(rowid, key, 'decode', failure)
+                    continue
+
+                try:
+                    codec.encode(value)
+                except Exception as exc:  # pylint: disable=broad-except
+                    report.add_failure(rowid, key, 'encode', exc)
+                    continue
+
+                if dry_run:
+                    report.migrated += 1
+                    continue
+
+                size, new_mode, new_filename, new_value = disk.store(
+                    value, False, key=key
+                )
+
+                with self._transact(retry, new_filename) as (sql, cleanup):
+                    if filename is not None:
+                        cleanup(filename)
+                    sql(
+                        'UPDATE Cache SET size = ?, mode = ?,'
+                        ' filename = ?, value = ? WHERE rowid = ?',
+                        (size, new_mode, new_filename, new_value, rowid),
+                    )
+
+                report.migrated += 1
+
+        return report
 
     def create_tag_index(self):
         """Create tag index on cache database.

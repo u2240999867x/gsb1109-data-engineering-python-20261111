@@ -69,6 +69,41 @@ Recipes
 
 .. autodecorator:: diskcache.memoize_stampede
 
+Codecs
+------
+
+Read the :doc:`Codec Migration tutorial <codec>` for example usage.
+
+.. autoclass:: diskcache.VersionedDisk
+   :members:
+
+.. autoclass:: diskcache.Codec
+   :members:
+
+.. autoclass:: diskcache.JSONCodec
+   :members:
+
+.. autoclass:: diskcache.PickleCodec
+   :members:
+
+.. autoclass:: diskcache.CodecRegistry
+   :members:
+
+.. autoclass:: diskcache.MigrationReport
+   :members:
+
+.. autoclass:: diskcache.CodecError
+   :members:
+
+.. autoclass:: diskcache.UnknownFormatError
+   :members:
+
+.. autoclass:: diskcache.UnrepresentableError
+   :members:
+
+.. autoclass:: diskcache.DecodeError
+   :members:
+
 .. _constants:
 
 Constants
