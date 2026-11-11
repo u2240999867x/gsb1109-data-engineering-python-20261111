@@ -112,6 +112,64 @@ class JMESPathTypeError(JMESPathError):
                     self.expected_types, self.actual_type))
 
 
+@with_str_method
+class JMESPathNumericTypeError(JMESPathTypeError):
+    """Raised when numeric values of incompatible kinds are mixed.
+
+    The canonical case is mixing ``decimal.Decimal`` with ``float``.
+    JMESPath never implicitly converts a ``Decimal`` to ``float`` because
+    doing so would silently lose precision, so the offending operation is
+    rejected instead.  Function errors name the function and the argument
+    position; ordering comparator errors name the operator and the operand.
+    """
+
+    def __init__(self, context, current_value, argument_label,
+                 action='combined'):
+        self.context = context
+        self.argument_label = argument_label
+        self.action = action
+        self.current_value = current_value
+        self.actual_type = type(current_value).__name__
+        self.expected_types = ['number']
+        # Keep the base class attributes populated so existing code that
+        # inspects ``function_name`` keeps working.
+        self.function_name = context
+
+    @classmethod
+    def for_function(cls, function_name, argument_index, current_value):
+        return cls(
+            'function %s()' % function_name,
+            current_value,
+            'argument %s' % argument_index,
+            action='combined')
+
+    @classmethod
+    def for_operator(cls, operator, operand_index, current_value):
+        symbols = {'lt': '<', 'lte': '<=', 'gt': '>', 'gte': '>='}
+        symbol = symbols.get(operator)
+        if symbol is not None:
+            operator = '%s (%s)' % (operator, symbol)
+        return cls(
+            'ordering operator "%s"' % operator,
+            current_value,
+            'operand %s' % operand_index,
+            action='compared')
+
+    def __str__(self):
+        if self.actual_type == 'Decimal':
+            value_kind, other_kind = 'decimal.Decimal', 'float'
+        else:
+            value_kind, other_kind = 'float', 'decimal.Decimal'
+        return (
+            'In %s, %s mixes incompatible numeric types for value: '
+            '%s ("%s"): a %s value cannot be %s with %s values; '
+            'Decimal values are never implicitly converted to float, '
+            'convert the value explicitly before passing it to JMESPath'
+            % (
+                self.context, self.argument_label, self.current_value,
+                self.actual_type, value_kind, self.action, other_kind))
+
+
 class EmptyExpressionError(JMESPathError):
     def __init__(self):
         super(EmptyExpressionError, self).__init__(

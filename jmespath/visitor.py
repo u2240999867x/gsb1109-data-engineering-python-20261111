@@ -1,8 +1,8 @@
 import operator
 
 from jmespath import functions
+from jmespath import numeric
 from jmespath.compat import string_type
-from numbers import Number
 
 
 def _equals(x, y):
@@ -51,9 +51,11 @@ def _is_actual_number(x):
     # True
     # >>> isinstance(True, int)
     # True
-    if isinstance(x, bool):
-        return False
-    return isinstance(x, Number)
+    #
+    # The actual number test (int, float and Decimal) lives in the
+    # numeric type policy module so every part of the interpreter agrees
+    # on what counts as a JMESPath number.
+    return numeric.is_number(x)
 
 
 class Options(object):
@@ -151,10 +153,15 @@ class TreeInterpreter(Visitor):
             # will yield a None value.
             left = self.visit(node['children'][0], value)
             right = self.visit(node['children'][1], value)
-            num_types = (int, float)
             if not (_is_comparable(left) and
                     _is_comparable(right)):
                 return None
+            # Numeric ordering must not silently coerce a Decimal to
+            # float, so a Decimal/float pair is rejected explicitly.
+            # Integers are exact and remain compatible with both.
+            if _is_actual_number(left) and _is_actual_number(right):
+                numeric.check_numeric_operands(
+                    node['value'], left, right)
             return comparator_func(left, right)
 
     def visit_current(self, node, value):

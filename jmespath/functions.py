@@ -1,7 +1,9 @@
 import math
 import json
+from decimal import Decimal
 
 from jmespath import exceptions
+from jmespath import numeric
 from jmespath.compat import string_type as STRING_TYPE
 from jmespath.compat import get_methods
 
@@ -17,6 +19,7 @@ TYPES_MAP = {
     'float': 'number',
     'int': 'number',
     'long': 'number',
+    'Decimal': 'number',
     'OrderedDict': 'object',
     '_Projection': 'array',
     '_Expression': 'expref',
@@ -30,7 +33,7 @@ REVERSE_TYPES_MAP = {
     'object': ('dict', 'OrderedDict',),
     'null': ('NoneType',),
     'string': ('unicode', 'str'),
-    'number': ('float', 'int', 'long'),
+    'number': ('float', 'int', 'long', 'Decimal'),
     'expref': ('_Expression',),
 }
 
@@ -40,6 +43,43 @@ def signature(*arguments):
         func.signature = arguments
         return func
     return _record_signature
+
+
+def _json_key(key):
+    # Mirror ``json.dumps`` dict-key handling so non-string keys keep
+    # their historical quoted representation.
+    if isinstance(key, str):
+        text = key
+    elif key is True:
+        text = 'true'
+    elif key is False:
+        text = 'false'
+    elif key is None:
+        text = 'null'
+    else:
+        text = str(key)
+    return json.dumps(text, separators=(',', ':'), default=str)
+
+
+def _json_dumps(value):
+    """Serialize ``value`` to JSON without turning Decimals into strings.
+
+    ``json.dumps`` has no native ``Decimal`` support, so the default
+    ``str`` fallback would quote a Decimal (``"1.5"``) even though an
+    equivalent float renders as a number (``1.5``).  Render Decimals as
+    exact JSON number literals instead, matching the historical float
+    output while preserving the Decimal's precision and scale.
+    """
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        items = [
+            '%s:%s' % (_json_key(key), _json_dumps(item))
+            for key, item in value.items()]
+        return '{%s}' % ','.join(items)
+    if isinstance(value, (list, tuple)):
+        return '[%s]' % ','.join(_json_dumps(item) for item in value)
+    return json.dumps(value, separators=(',', ':'), default=str)
 
 
 class FunctionRegistry(type):
@@ -168,7 +208,14 @@ class Functions(metaclass=FunctionRegistry):
     @signature({'types': ['array-number']})
     def _func_avg(self, arg):
         if arg:
-            return sum(arg) / len(arg)
+            numeric.check_numeric_values('avg', 1, arg)
+            total = sum(arg)
+            if isinstance(total, Decimal):
+                # Keep Decimal precision: dividing by a float would
+                # coerce the whole result to binary float.
+                return total / Decimal(len(arg))
+            else:
+                return total / len(arg)
         else:
             return None
 
@@ -190,8 +237,7 @@ class Functions(metaclass=FunctionRegistry):
         if isinstance(arg, STRING_TYPE):
             return arg
         else:
-            return json.dumps(arg, separators=(',', ':'),
-                              default=str)
+            return _json_dumps(arg)
 
     @signature({'types': []})
     def _func_to_number(self, arg):
@@ -199,7 +245,9 @@ class Functions(metaclass=FunctionRegistry):
             return None
         elif arg is None:
             return None
-        elif isinstance(arg, (int, float)):
+        elif isinstance(arg, (int, float, Decimal)):
+            # Decimal is returned untouched: converting it to float would
+            # silently lose the precision the caller parsed it with.
             return arg
         else:
             try:
@@ -255,6 +303,7 @@ class Functions(metaclass=FunctionRegistry):
     @signature({"types": ['array-number', 'array-string']})
     def _func_max(self, arg):
         if arg:
+            numeric.check_numeric_values('max', 1, arg)
             return max(arg)
         else:
             return None
@@ -269,16 +318,19 @@ class Functions(metaclass=FunctionRegistry):
     @signature({"types": ['array-number', 'array-string']})
     def _func_min(self, arg):
         if arg:
+            numeric.check_numeric_values('min', 1, arg)
             return min(arg)
         else:
             return None
 
     @signature({"types": ['array-string', 'array-number']})
     def _func_sort(self, arg):
+        numeric.check_numeric_values('sort', 1, arg)
         return list(sorted(arg))
 
     @signature({"types": ['array-number']})
     def _func_sum(self, arg):
+        numeric.check_numeric_values('sum', 1, arg)
         return sum(arg)
 
     @signature({"types": ['object']})
@@ -301,7 +353,7 @@ class Functions(metaclass=FunctionRegistry):
             return "array"
         elif isinstance(arg, dict):
             return "object"
-        elif isinstance(arg, (float, int)):
+        elif isinstance(arg, (float, int, Decimal)):
             return "number"
         elif arg is None:
             return "null"
@@ -321,6 +373,7 @@ class Functions(metaclass=FunctionRegistry):
         if required_type not in ['number', 'string']:
             raise exceptions.JMESPathTypeError(
                 'sort_by', array[0], required_type, ['string', 'number'])
+        self._validate_key_values('sort_by', expref, array, required_type)
         keyfunc = self._create_key_func(expref,
                                         [required_type],
                                         'sort_by')
@@ -328,6 +381,8 @@ class Functions(metaclass=FunctionRegistry):
 
     @signature({'types': ['array']}, {'types': ['expref']})
     def _func_min_by(self, array, expref):
+        self._validate_key_values(
+            'min_by', expref, array, ['number', 'string'])
         keyfunc = self._create_key_func(expref,
                                         ['number', 'string'],
                                         'min_by')
@@ -338,6 +393,8 @@ class Functions(metaclass=FunctionRegistry):
 
     @signature({'types': ['array']}, {'types': ['expref']})
     def _func_max_by(self, array, expref):
+        self._validate_key_values(
+            'max_by', expref, array, ['number', 'string'])
         keyfunc = self._create_key_func(expref,
                                         ['number', 'string'],
                                         'max_by')
@@ -345,6 +402,41 @@ class Functions(metaclass=FunctionRegistry):
             return max(array, key=keyfunc)
         else:
             return None
+
+    def _validate_key_values(self, function_name, expref, array,
+                             allowed_types):
+        # sort_by validates against a single type (a plain string) while
+        # min_by/max_by accept both numbers and strings (a list).
+        if isinstance(allowed_types, str):
+            allowed_types = [allowed_types]
+        # Evaluate every key up front so that the type error is always
+        # attributed to this function (and, for numeric keys, so a
+        # Decimal/float mix is rejected before sorting can coerce).
+        key_values = [
+            expref.visit(expref.expression, element) for element in array]
+        if not key_values:
+            return
+        resolved_types = [
+            self._convert_to_jmespath_type(type(value).__name__)
+            for value in key_values]
+        for value, jmespath_type in zip(key_values, resolved_types):
+            if jmespath_type not in allowed_types:
+                raise exceptions.JMESPathTypeError(
+                    function_name, value, jmespath_type,
+                    allowed_types)
+        # When numbers and strings are both allowed, the keys still have
+        # to be homogeneous because a number key cannot be ordered against
+        # a string key.  This mirrors sort_by's dynamic key validation.
+        if 'number' in allowed_types and 'string' in allowed_types:
+            required_type = resolved_types[0]
+            for value, jmespath_type in zip(key_values[1:],
+                                            resolved_types[1:]):
+                if jmespath_type != required_type:
+                    raise exceptions.JMESPathTypeError(
+                        function_name, value, jmespath_type,
+                        [required_type])
+        if resolved_types[0] == 'number':
+            numeric.check_numeric_values(function_name, 2, key_values)
 
     def _create_key_func(self, expref, allowed_types, function_name):
         def keyfunc(x):

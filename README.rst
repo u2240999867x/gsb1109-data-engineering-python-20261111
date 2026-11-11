@@ -101,6 +101,50 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Numeric Types and Decimal
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+JMESPath treats ``decimal.Decimal`` values as ordinary numbers, which
+matters when upstream code parses JSON money amounts with
+``json.loads(..., parse_float=decimal.Decimal)``.  The numeric functions
+(``abs``, ``avg``, ``ceil``, ``floor``, ``max``, ``min``, ``sort``,
+``sum`` and the ``*_by`` functions) and the ordering comparators
+(``<``, ``<=``, ``>``, ``>=``) follow an explicit numeric type policy so
+that precision is never lost silently:
+
+* ``Decimal`` is reported as ``"number"`` by ``type()`` and returned
+  unchanged by ``to_number()``; it is never implicitly converted to
+  ``float``.  ``to_string()`` renders it as an exact JSON number (for
+  example ``1.50`` stays ``"1.50"``) instead of silently converting it
+  to a JSON string.
+* ``Decimal`` mixed with ``int`` is fine: integers are exact, so
+  ``sum``/``avg`` keep returning a ``Decimal`` and ordering/comparison
+  stays precise.
+* ``Decimal`` mixed with binary ``float`` inside one numeric operation
+  raises ``jmespath.exceptions.JMESPathNumericTypeError`` (a subclass of
+  ``JMESPathTypeError``).  The error names the function and argument, or
+  the ordering operator and operand, so the offending value can be fixed
+  explicitly instead of being coerced.
+* Equality (``==``/``!=``) performs no arithmetic and never coerces
+  either operand, so it never raises this error.
+* Plain JSON ``int``/``float`` queries keep their historical behavior;
+  nothing changes when no ``Decimal`` is involved, and booleans are never
+  considered numbers.
+
+.. code:: python
+
+    >>> import jmespath
+    >>> from decimal import Decimal
+    >>> jmespath.search('sum(@)', [Decimal('1.1'), Decimal('2.2')])
+    Decimal('3.3')
+    >>> jmespath.search('sum(@)', [1, Decimal('2.2')])
+    Decimal('3.2')
+    >>> jmespath.search('sum(@)', [1.1, Decimal('2.2')])
+    Traceback (most recent call last):
+        ...
+    jmespath.exceptions.JMESPathNumericTypeError: In function sum(), ...
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 

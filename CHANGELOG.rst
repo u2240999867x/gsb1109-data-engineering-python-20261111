@@ -1,7 +1,22 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Treat ``decimal.Decimal`` values as numbers throughout the
+  interpreter: type checking, ``type()``, ``to_number()``, the numeric
+  functions (``abs``, ``avg``, ``ceil``, ``floor``, ``max``, ``min``,
+  ``sort``, ``sum``) and ``sort_by``/``min_by``/``max_by``.
+* Add an explicit numeric type policy (``jmespath.numeric``).  Mixing
+  ``Decimal`` with ``int`` stays precise, while mixing ``Decimal`` with
+  binary ``float`` in an aggregation, ordering or comparison operation
+  raises the new ``JMESPathNumericTypeError`` instead of implicitly
+  converting the ``Decimal`` to ``float``.  The error names the function
+  and argument (or the ordering operator and operand).
+* ``avg()`` divides Decimal totals by a ``Decimal`` count so precision
+  is preserved.
+* ``to_string()`` renders Decimal values as exact JSON numbers (keeping
+  their precision and scale) instead of silently turning them into JSON
+  strings.
+* Plain JSON ``int``/``float`` behavior is unchanged.
 
 
 1.1.0
