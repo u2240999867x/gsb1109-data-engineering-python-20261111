@@ -10,6 +10,7 @@ API
     api/columns_and_rows
     api/data_types
     api/type_tester
+    api/type_checker
     api/aggregations
     api/computations
     api/csv

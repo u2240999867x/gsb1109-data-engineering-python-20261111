@@ -1,6 +1,7 @@
 1.14.3 - Unreleased
 -------------------
 
+- feat: :class:`.TypeChecker` checks a batch of values against a target :class:`.DataType` before creating a :class:`.Table`, classifying each value as :data:`.EXACT`, :data:`.LOSSY` or :data:`.INVALID` while retaining its row position and original input.
 - feat: :class:`.Median`, :class:`.Percentiles`, :class:`.Quartiles`, :class:`.Quintiles`, :class:`.Deciles` and :class:`.IQR` can be applied to :class:`.TimeDelta` columns, like :class:`.Sum` and :class:`.Mean`.
 - fix: :meth:`.Table.distinct` now deduplicates rows when ``key`` is a sequence of column names.
 - fix: :class:`.Rank` ranks null values last when ``reverse=True``.
