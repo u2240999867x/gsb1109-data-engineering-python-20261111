@@ -9,6 +9,7 @@ Unreleased
 ----------
 
 * Updated functions:
+    * :class:`bucket` gained *max_backlog* and *reject* parameters to cap the unread backlog and route overflowing (or explicitly closed) items to a caller-supplied callback, plus a :meth:`~bucket.close` method to shut a bucket without silently recreating it.
     * :func:`peekable` was updated to avoid caching the entire iterable when sliced with a negative step and omitted *stop*.
 
 11.2.1

@@ -1181,6 +1181,63 @@ class bucket:
         >>> list(s[2])
         []
 
+    **Backlog control**
+
+    Pass *max_backlog* to cap the number of items cached in buckets that no
+    consumer is currently draining (the unread backlog). Items that would
+    overflow the cap, and items whose buckets have been explicitly closed via
+    :meth:`close`, are handed to the *reject* callable as
+    ``reject(item, key_value)`` instead of being cached. When *reject* is
+    ``None`` (the default) such items are silently dropped. The backlog cap
+    and reject hook only take effect when *max_backlog* is given; without it,
+    a bucket behaves exactly as before (apart from explicit :meth:`close`
+    calls).
+
+        >>> rejected = []
+        >>> s = bucket(
+        ...     ['a1', 'b1', 'b2', 'a2'],
+        ...     key=lambda x: x[0],
+        ...     max_backlog=1,
+        ...     reject=lambda item, key_value: rejected.append((key_value, item)),
+        ... )
+        >>> next(s['a'])
+        'a1'
+        >>> rejected  # 'b2' overflowed the single-item backlog
+        [('b', 'b2')]
+
+    When the backlog is full, the position in the source iterable is
+    preserved: the item already pulled from the source is never lost, it is
+    either delivered to the active consumer or passed to *reject*.
+
+        >>> s = bucket(['a1', 'b1', 'a2'], key=lambda x: x[0], max_backlog=0)
+        >>> list(s['a'])  # 'b1' is rejected (and dropped) but 'a2' is kept
+        ['a1', 'a2']
+
+    Call :meth:`close` to shut a bucket explicitly, even before any item for
+    that key has been seen. Afterwards, further items with that key go to
+    *reject* (or are dropped) rather than silently recreating the bucket,
+    while items already cached remain consumable.
+
+        >>> rejected = []
+        >>> s = bucket(
+        ...     ['a1', 'b1', 'a2', 'b2'],
+        ...     key=lambda x: x[0],
+        ...     max_backlog=10,
+        ...     reject=lambda item, key_value: rejected.append(item),
+        ... )
+        >>> a = s['a']
+        >>> next(a)
+        'a1'
+        >>> s.close('a')
+        >>> list(a)  # cached items are drained first, then the bucket stops
+        []
+        >>> list(s['b'])  # advancing the source rejects the later 'a' item
+        ['b1', 'b2']
+        >>> rejected
+        ['a2']
+        >>> list(s['a'])  # the bucket is never silently recreated
+        []
+
     .. seealso:: :func:`map_reduce`, :func:`groupby_transform`
 
     If storage is not a concern, :func:`map_reduce` returns a Python
@@ -1190,7 +1247,9 @@ class bucket:
 
     """
 
-    def __init__(self, iterable, key, validator=None):
+    def __init__(
+        self, iterable, key, validator=None, max_backlog=None, reject=None
+    ):
         self._it = iter(iterable)
         self._key = key
         self._cache = defaultdict(deque)
@@ -1198,6 +1257,15 @@ class bucket:
         # callable object that is falsey (e.g. an empty ``set`` subclass with
         # ``__call__``), and ``validator or ...`` would silently replace it.
         self._validator = (lambda x: True) if validator is None else validator
+        # ``max_backlog=None`` keeps the historical, unbounded behavior.
+        if max_backlog is not None and max_backlog < 0:
+            raise ValueError('max_backlog must be a non-negative integer')
+        self._max_backlog = max_backlog
+        self._reject = reject
+        self._closed = set()
+        # Keys a child iterator is currently draining. Their items are handed
+        # over directly instead of counting against the unread backlog.
+        self._in_flight = set()
 
     def __contains__(self, value):
         if not self._validator(value):
@@ -1212,39 +1280,77 @@ class bucket:
 
         return True
 
+    def _backlog_size(self):
+        """Number of cached items in buckets that nobody is draining."""
+        return sum(
+            len(queue)
+            for key_value, queue in self._cache.items()
+            if key_value not in self._in_flight
+        )
+
+    def _store(self, item, item_value):
+        """Route one item read from the source to a cache or the reject hook.
+
+        The item has already been pulled from the source iterable, so this
+        never raises on a full backlog: it either caches the item or passes
+        it to the reject callback, preserving the source position.
+        """
+        if item_value in self._closed:
+            self._reject_item(item, item_value)
+        elif self._max_backlog is None:
+            self._cache[item_value].append(item)
+        elif item_value in self._in_flight:
+            self._cache[item_value].append(item)
+        elif self._backlog_size() < self._max_backlog:
+            self._cache[item_value].append(item)
+        else:
+            self._reject_item(item, item_value)
+
+    def _reject_item(self, item, item_value):
+        if self._reject is not None:
+            self._reject(item, item_value)
+
     def _get_values(self, value):
         """
         Helper to yield items from the parent iterator that match *value*.
         Items that don't match are stored in the local cache as they
         are encountered.
         """
-        while True:
-            # If we've cached some items that match the target value, emit
-            # the first one and evict it from the cache.
-            if self._cache.get(value):
-                yield self._cache[value].popleft()
-            # Otherwise we need to advance the parent iterator to search for
-            # a matching item, caching the rest.
-            else:
-                while True:
-                    try:
-                        item = next(self._it)
-                    except StopIteration:
-                        return
-                    item_value = self._key(item)
-                    if item_value == value:
-                        if value not in self._cache:
-                            self._cache[value] = deque()
-                        yield item
-                        break
-                    elif self._validator(item_value):
-                        self._cache[item_value].append(item)
+        self._in_flight.add(value)
+        try:
+            while True:
+                # If we've cached some items that match the target value, emit
+                # the first one and evict it from the cache.
+                if self._cache.get(value):
+                    yield self._cache[value].popleft()
+                # A closed bucket only serves what was already cached; it no
+                # longer pulls new items from the source.
+                elif value in self._closed:
+                    return
+                # Otherwise we need to advance the parent iterator to search
+                # for a matching item, caching the rest.
+                else:
+                    while True:
+                        try:
+                            item = next(self._it)
+                        except StopIteration:
+                            return
+                        item_value = self._key(item)
+                        if item_value == value:
+                            if value not in self._cache:
+                                self._cache[value] = deque()
+                            yield item
+                            break
+                        elif self._validator(item_value):
+                            self._store(item, item_value)
+        finally:
+            self._in_flight.discard(value)
 
     def __iter__(self):
         for item in self._it:
             item_value = self._key(item)
             if self._validator(item_value):
-                self._cache[item_value].append(item)
+                self._store(item, item_value)
 
         return iter(self._cache)
 
@@ -1253,6 +1359,17 @@ class bucket:
             return iter(())
 
         return self._get_values(value)
+
+    def close(self, value):
+        """Close the bucket for *value*.
+
+        Works even if no item for *value* has ever been seen: the bucket is
+        marked closed up front, so later items with that key are sent to the
+        reject callback (or dropped) instead of silently creating a bucket.
+        Items already cached for *value* can still be consumed, but the child
+        iterator stops once they have been drained.
+        """
+        self._closed.add(value)
 
 
 def spy(iterable, n=1):

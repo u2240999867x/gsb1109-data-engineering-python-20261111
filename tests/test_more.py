@@ -1188,6 +1188,146 @@ class BucketTests(TestCase):
             self.assertFalse(missing in D)
         self.assertEqual(set(D), {10, 20})
 
+    def test_max_backlog_rejects_overflow(self):
+        rejected = []
+        D = mi.bucket(
+            ['a1', 'b1', 'b2', 'a2'],
+            key=lambda x: x[0],
+            max_backlog=1,
+            reject=lambda item, key_value: rejected.append((key_value, item)),
+        )
+        self.assertEqual(next(D['a']), 'a1')
+        self.assertEqual(next(D['a']), 'a2')
+        # Only one unread item may be cached, so the second 'b' overflows.
+        self.assertEqual(rejected, [('b', 'b2')])
+        self.assertEqual(list(D['b']), ['b1'])
+
+    def test_max_backlog_zero_keeps_drained_items(self):
+        rejected = []
+        D = mi.bucket(
+            ['a1', 'a2', 'b1'],
+            key=lambda x: x[0],
+            max_backlog=0,
+            reject=lambda item, key_value: rejected.append((key_value, item)),
+        )
+        # The active bucket is not part of the backlog: both 'a' items are
+        # delivered; only the unread 'b' item is rejected.
+        self.assertEqual(list(D['a']), ['a1', 'a2'])
+        self.assertEqual(rejected, [('b', 'b1')])
+
+    def test_max_backlog_zero_without_reject_drops_silently(self):
+        # The item already pulled from the source must never be lost by
+        # raising; unmatched items are dropped when there is no callback.
+        D = mi.bucket(
+            ['a1', 'b1', 'a2'],
+            key=lambda x: x[0],
+            max_backlog=0,
+        )
+        self.assertEqual(list(D['a']), ['a1', 'a2'])
+        self.assertEqual(list(D['b']), [])
+
+    def test_backlog_cap_is_released_after_consumption(self):
+        rejected = []
+        D = mi.bucket(
+            ['b1', 'a1', 'b2'],
+            key=lambda x: x[0],
+            max_backlog=1,
+            reject=lambda item, key_value: rejected.append(item),
+        )
+        self.assertEqual(list(D['b']), ['b1', 'b2'])
+        self.assertEqual(list(D['a']), ['a1'])
+        self.assertEqual(rejected, [])
+
+    def test_invalid_max_backlog(self):
+        with self.assertRaises(ValueError):
+            mi.bucket([], key=lambda x: x, max_backlog=-1)
+
+    def test_close_before_any_item_blocks_bucket_creation(self):
+        rejected = []
+        D = mi.bucket(
+            ['a1', 'b1', 'a2'],
+            key=lambda x: x[0],
+            max_backlog=10,
+            reject=lambda item, key_value: rejected.append(item),
+        )
+        D.close('a')
+        self.assertNotIn('a', D)
+        self.assertEqual(list(D['a']), [])
+        # Advancing the source routes the closed key's items to the callback.
+        self.assertEqual(list(D['b']), ['b1'])
+        self.assertEqual(rejected, ['a1', 'a2'])
+        # The bucket is never silently recreated.
+        self.assertEqual(list(D['a']), [])
+
+    def test_close_drains_cached_items_then_stops(self):
+        rejected = []
+        D = mi.bucket(
+            ['a1', 'b1', 'a2', 'b2'],
+            key=lambda x: x[0],
+            max_backlog=10,
+            reject=lambda item, key_value: rejected.append(item),
+        )
+        a = D['a']
+        self.assertEqual(next(a), 'a1')
+        D.close('a')
+        self.assertEqual(list(a), [])
+        self.assertEqual(list(D['b']), ['b1', 'b2'])
+        self.assertEqual(rejected, ['a2'])
+        self.assertEqual(list(D['a']), [])
+
+    def test_close_works_without_backlog_options(self):
+        # Explicit closing must also work in the legacy configuration.
+        D = mi.bucket(['a1', 'b1', 'a2'], key=lambda x: x[0])
+        D.close('a')
+        self.assertEqual(list(D['b']), ['b1'])
+        self.assertEqual(list(D['a']), [])
+
+    def test_iteration_respects_backlog_and_close(self):
+        rejected = []
+        D = mi.bucket(
+            ['a1', 'b1', 'b2', 'c1'],
+            key=lambda x: x[0],
+            max_backlog=2,
+            reject=lambda item, key_value: rejected.append((key_value, item)),
+        )
+        D.close('c')
+        keys = set(D)  # Drains the whole source through the reject routing.
+        self.assertEqual(keys, {'a', 'b'})
+        self.assertEqual(rejected, [('b', 'b2'), ('c', 'c1')])
+        self.assertEqual(list(D['a']), ['a1'])
+        self.assertEqual(list(D['b']), ['b1'])
+
+    def test_multiple_open_child_iterables_share_source(self):
+        rejected = []
+        D = mi.bucket(
+            ['a1', 'b1', 'a2', 'b2'],
+            key=lambda x: x[0],
+            max_backlog=0,
+            reject=lambda item, key_value: rejected.append(item),
+        )
+        a = D['a']
+        b = D['b']
+        # Both buckets are actively draining. While scanning for 'b' items the
+        # source yields an 'a' item belonging to the other open iterator: it is
+        # cached directly without counting against the zero backlog, and
+        # nothing is rejected.
+        self.assertEqual(next(a), 'a1')
+        self.assertEqual(next(b), 'b1')
+        self.assertEqual(next(b), 'b2')
+        self.assertEqual(next(a), 'a2')
+        self.assertEqual(rejected, [])
+
+    def test_reject_receives_key_value(self):
+        seen = []
+        D = mi.bucket(
+            [10, 20, 11],
+            key=lambda x: 10 * (x // 10),
+            max_backlog=0,
+            reject=lambda item, key_value: seen.append((item, key_value)),
+        )
+        self.assertEqual(list(D[10]), [10, 11])
+        self.assertEqual(seen, [(20, 20)])
+
 
 class SpyTests(TestCase):
     """Tests for ``spy()``"""
