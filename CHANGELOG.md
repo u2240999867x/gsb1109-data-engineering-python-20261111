@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `sort_keys()` to tables, documents and containers, sorting one table's key/value pairs in place by key name while the rest of the document stays byte-for-byte untouched. Standalone comments can be declared to travel with the item below (`comments="next"`, the default) or above (`comments="previous"`), blank-line-separated runs can be sorted as indivisible blocks (`blocks=True`), and dotted keys and separately declared sub-tables keep their original form and ownership instead of being rewritten.
+
 ### Changed
 
 - Speed up repeated array appends by keeping existing indexes instead of rebuilding them.

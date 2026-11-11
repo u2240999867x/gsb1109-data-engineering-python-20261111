@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 
+from collections.abc import Callable
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 from typing import Any
@@ -100,6 +101,159 @@ def _render_empty_aot(key: str, aot: AoT) -> str:
         f"{decode(aot.trivia.comment)}"
         f"{aot.trivia.trail or chr(10)}"
     )
+
+
+def _entry_has_newline(entry: tuple[Key | None, Item]) -> bool:
+    """Whether the body entry renders a line break."""
+    v = entry[1]
+    if isinstance(v, Whitespace):
+        return "\n" in v.s
+    return "\n" in v.trivia.indent or "\n" in v.trivia.trail
+
+
+def _ensure_line_breaks(entries: list[tuple[Key | None, Item]]) -> None:
+    """Guarantee every entry of a reordered region starts on its own line.
+
+    Entries keep their own trivia when they move, so an entry that used to
+    sit at EOF without a trailing newline can land in the middle of the
+    region; give it the line break its new neighbour relies on.
+    """
+    for cur_entry, nxt_entry in zip(entries, entries[1:]):
+        cur = cur_entry[1]
+        nxt = nxt_entry[1]
+        if isinstance(cur, Whitespace):
+            if "\n" in cur.s:
+                continue
+        elif "\n" in cur.trivia.trail:
+            continue
+        if isinstance(nxt, Whitespace):
+            if "\n" in nxt.s:
+                continue
+        elif "\n" in nxt.trivia.indent:
+            continue
+        if isinstance(cur, Whitespace):
+            cur._s += "\n"
+        else:
+            cur.trivia.trail += "\n"
+
+
+def _sorted_units(
+    region: list[tuple[Key | None, Item]],
+    key_fn: Callable[[str], Any],
+    attach_next: bool,
+    reverse: bool,
+) -> list[tuple[Key | None, Item]] | None:
+    """Sort every keyed entry of ``region`` as its own unit.
+
+    Unkeyed entries (comments, blank lines) travel with the keyed entry the
+    attachment policy points at.  Returns ``None`` when the region is
+    already in order.
+    """
+    head: list[tuple[Key | None, Item]] = []
+    tail: list[tuple[Key | None, Item]] = []
+    units: list[tuple[Any, list[tuple[Key | None, Item]]]] = []
+    if attach_next:
+        pending: list[tuple[Key | None, Item]] = []
+        for k, v in region:
+            if k is None:
+                pending.append((k, v))
+            else:
+                units.append((key_fn(k.key), [*pending, (k, v)]))
+                pending = []
+        tail = pending
+    else:
+        current: list[tuple[Key | None, Item]] | None = None
+        for k, v in region:
+            if k is None:
+                if current is None:
+                    head.append((k, v))
+                else:
+                    current.append((k, v))
+            else:
+                current = [(k, v)]
+                units.append((key_fn(k.key), current))
+    order = sorted(range(len(units)), key=lambda i: units[i][0], reverse=reverse)
+    if order == list(range(len(units))):
+        return None
+    result = head
+    for i in order:
+        result += units[i][1]
+    return result + tail
+
+
+def _sorted_blocks(
+    region: list[tuple[Key | None, Item]],
+    key_fn: Callable[[str], Any],
+    attach_next: bool,
+    reverse: bool,
+) -> list[tuple[Key | None, Item]] | None:
+    """Sort blank-line-separated blocks of ``region`` as indivisible units.
+
+    Blank lines stay in their slots, so the vertical spacing of the region
+    is preserved exactly; blocks are ordered by their first key and their
+    content is kept verbatim.  Returns ``None`` when already in order.
+    """
+    # ``separators[i]`` holds the blank lines preceding ``segments[i]``.
+    segments: list[list[tuple[Key | None, Item]]] = [[]]
+    separators: list[list[tuple[Key | None, Item]]] = [[]]
+    for entry in region:
+        k, v = entry
+        if k is None and isinstance(v, Whitespace) and "\n" in v.s:
+            if not segments[-1]:
+                # consecutive blank lines share one separator slot
+                separators[-1].append(entry)
+            else:
+                separators.append([entry])
+                segments.append([])
+        else:
+            segments[-1].append(entry)
+
+    def has_key(segment: list[tuple[Key | None, Item]]) -> bool:
+        return any(k is not None for k, _ in segment)
+
+    # Keyless stretches between blank lines (bare comments) cannot be
+    # ordered on their own; glue them to the neighbour the comment policy
+    # points at, absorbing the separator between them.
+    i = 1
+    while i < len(segments) - 1:
+        if has_key(segments[i]):
+            i += 1
+        elif attach_next:
+            segments[i + 1] = segments[i] + separators[i + 1] + segments[i + 1]
+            del segments[i]
+            del separators[i + 1]
+        else:
+            segments[i - 1] = segments[i - 1] + separators[i] + segments[i]
+            del segments[i]
+            del separators[i]
+
+    head: list[tuple[Key | None, Item]] = []
+    tail: list[tuple[Key | None, Item]] = []
+    lo = 0
+    hi = len(segments)
+    if not has_key(segments[0]):
+        head = separators[0] + segments[0]
+        lo = 1
+    if hi > lo and not has_key(segments[hi - 1]):
+        tail = separators[hi - 1] + segments[hi - 1]
+        hi -= 1
+
+    blocks = segments[lo:hi]
+    slots = separators[lo:hi]
+
+    def first_key(segment: list[tuple[Key | None, Item]]) -> Any:
+        return key_fn(next(k for k, _ in segment if k is not None).key)
+
+    order = sorted(
+        range(len(blocks)), key=lambda i: first_key(blocks[i]), reverse=reverse
+    )
+    if order == list(range(len(blocks))):
+        return None
+    result = head
+    for slot, block_idx in zip(slots, order):
+        result += slot
+        result += blocks[block_idx]
+    return result + tail
 
 
 class Container(_CustomDict):  # type: ignore[type-arg]
@@ -588,6 +742,112 @@ class Container(_CustomDict):  # type: ignore[type-arg]
         dict.__delitem__(self, key.key)
 
         return self
+
+    def sort_keys(
+        self,
+        *,
+        comments: str = "next",
+        blocks: bool = False,
+        key: Callable[[str], Any] | None = None,
+        reverse: bool = False,
+    ) -> Container:
+        """Sort the key/value pairs of this container in place.
+
+        Only the leading run of entries that renders inline -- plain values
+        and dotted keys -- takes part in the sort.  The run ends at the
+        first entry that emits a ``[table]`` or ``[[array]]`` header (a
+        sub-table, an array of tables, or a dotted key whose children render
+        a header); that entry and everything after it keep their exact
+        position and text.  Dotted keys therefore keep their dotted form
+        and separately declared sub-tables are never rewritten or moved, so
+        sorting a single table leaves the rest of the document byte-for-byte
+        untouched.
+
+        :param comments: which item a standalone comment line travels with:
+            ``"next"`` (the default) attaches it to the item below,
+            ``"previous"`` to the item above.
+        :param blocks: when true, runs of entries separated by blank lines
+            are sorted as indivisible blocks, ordered by their first key,
+            instead of sorting every key individually; the blank lines
+            themselves stay in place.
+        :param key: an optional callable mapping a key name to a sort key,
+            like the ``key`` argument of :func:`sorted`.
+        :param reverse: sort in descending order.
+
+        :Example:
+
+        >>> doc = parse("[t]\\nb = 1\\na = 2\\n")
+        >>> doc["t"].sort_keys()
+        >>> print(doc.as_string())
+        [t]
+        a = 2
+        b = 1
+        """
+        if comments not in ("next", "previous"):
+            raise ValueError(f'comments must be "next" or "previous", got {comments!r}')
+
+        body = self._body
+        end = 0
+        for k, v in body:
+            if k is not None and (
+                isinstance(v, AoT)
+                or (isinstance(v, Table) and not k.is_dotted())
+                or (isinstance(v, Table) and self._renders_table_header(v))
+            ):
+                break
+            end += 1
+
+        region = body[:end]
+        if not any(_entry_has_newline(entry) for entry in region):
+            # Not a line-based body (e.g. the body of an inline table, whose
+            # commas are standalone entries): reordering it would corrupt
+            # the rendering, and fewer than two lines cannot be sorted
+            # anyway.
+            return self
+
+        key_fn: Callable[[str], Any] = key if key is not None else lambda name: name
+        if blocks:
+            new_region = _sorted_blocks(region, key_fn, comments == "next", reverse)
+        else:
+            new_region = _sorted_units(region, key_fn, comments == "next", reverse)
+        if new_region is None:
+            return self
+
+        # Line endings stay positional: the entry landing on a line keeps
+        # that line's original ending, so a missing newline at EOF stays
+        # missing and no line ever gains one.
+        trails = [e[1].trivia.trail for e in region if e[0] is not None]
+        self._body[:] = new_region + body[end:]
+        keyed_items = (e[1] for e in new_region if e[0] is not None)
+        for item, trail in zip(keyed_items, trails):
+            item.trivia.trail = trail
+        _ensure_line_breaks(new_region)
+        self._reindex()
+        return self
+
+    def _reindex(self) -> None:
+        """Rebuild the key map and the dict view after ``_body`` was reordered.
+
+        ``_table_keys`` is left alone: reordering never moves table or
+        array-of-tables entries relative to each other, so it stays valid.
+        """
+        saved = {name: dict.__getitem__(self, name) for name in dict.keys(self)}
+        dict.clear(self)
+        self._map.clear()
+        self._validation_cache.clear()
+        self._out_of_order_keys.clear()
+        for i, (k, _v) in enumerate(self._body):
+            if k is None:
+                continue
+            current = self._map.get(k)
+            if current is None:
+                self._map[k] = i
+            else:
+                if not isinstance(current, tuple):
+                    current = (current,)
+                self._map[k] = (*current, i)
+                self._out_of_order_keys.add(k)
+            dict.__setitem__(self, k.key, saved[k.key])
 
     def _insert_at(self, idx: int, key: Key | str, item: Any) -> Container:
         if idx > len(self._body) - 1:

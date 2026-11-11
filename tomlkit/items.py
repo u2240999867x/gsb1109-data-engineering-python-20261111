@@ -7,6 +7,7 @@ import inspect
 import re
 import string
 
+from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterable
 from collections.abc import Iterator
@@ -2079,6 +2080,51 @@ class Table(AbstractTable):
             ):
                 return False
         return True
+
+    def sort_keys(
+        self,
+        *,
+        comments: str = "next",
+        blocks: bool = False,
+        key: Callable[[str], Any] | None = None,
+        reverse: bool = False,
+    ) -> Table:
+        """Sort the table's key/value pairs in place, preserving style.
+
+        Only the table's own entries are reordered; the rest of the
+        document stays byte-for-byte untouched.  Dotted keys keep their
+        dotted form and sub-tables declared with their own ``[header]``
+        are never rewritten or moved.  See
+        :meth:`tomlkit.container.Container.sort_keys` for the full
+        description of the parameters.
+
+        :param comments: which item a standalone comment line travels with:
+            ``"next"`` (the default) attaches it to the item below,
+            ``"previous"`` to the item above.
+        :param blocks: when true, blank-line-separated runs are sorted as
+            indivisible blocks, ordered by their first key.
+        :param key: an optional callable mapping a key name to a sort key.
+        :param reverse: sort in descending order.
+
+        :Example:
+
+        >>> doc = parse("[t]\\nb = 1\\na = 2\\n")
+        >>> doc["t"].sort_keys()
+        >>> print(doc.as_string())
+        [t]
+        a = 2
+        b = 1
+        """
+        self._value.sort_keys(
+            comments=comments, blocks=blocks, key=key, reverse=reverse
+        )
+        # Keep the dict view's insertion order in sync with the container.
+        saved = {name: dict.__getitem__(self, name) for name in dict.keys(self)}
+        dict.clear(self)
+        for k, _v in self._value.body:
+            if k is not None and k.key in saved:
+                dict.__setitem__(self, k.key, saved[k.key])
+        return self
 
     def as_string(self) -> str:
         return self._value.as_string()
