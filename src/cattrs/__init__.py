@@ -1,6 +1,12 @@
 from typing import Final
 
-from .converters import BaseConverter, Converter, GenConverter, UnstructureStrategy
+from .converters import (
+    BaseConverter,
+    Converter,
+    GenConverter,
+    PreparedGroup,
+    UnstructureStrategy,
+)
 from .errors import (
     AttributeValidationNote,
     BaseValidationError,
@@ -24,6 +30,7 @@ __all__ = [
     "GenConverter",
     "IterableValidationError",
     "IterableValidationNote",
+    "PreparedGroup",
     "SimpleStructureHook",
     "StructureHandlerNotFoundError",
     "UnstructureStrategy",

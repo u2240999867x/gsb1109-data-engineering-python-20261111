@@ -133,6 +133,32 @@ class MultiStrategyDispatch(Generic[Hook]):
         res = self._function_dispatch.dispatch(typ)
         return res if res is not None else self._fallback_factory(typ)
 
+    def begin_staging(
+        self,
+    ) -> tuple[Callable[[TargetType], Hook], dict[TargetType, Hook]]:
+        """Swap in isolated staging state, returning the previous live state.
+
+        While staging, generated hooks are cached separately and direct
+        registrations go into a copy, so discarding the staging state leaves
+        no residue in the live state. Only fully generated hooks are ever
+        visible to other threads, never placeholders.
+
+        Not part of the public API.
+        """
+        previous = (self.dispatch, self._direct_dispatch)
+        self.dispatch = lru_cache(maxsize=None)(self.dispatch_without_caching)
+        self._direct_dispatch = dict(self._direct_dispatch)
+        return previous
+
+    def restore_state(
+        self, state: tuple[Callable[[TargetType], Hook], dict[TargetType, Hook]]
+    ) -> None:
+        """Restore state previously returned by `begin_staging`.
+
+        Not part of the public API.
+        """
+        self.dispatch, self._direct_dispatch = state
+
     def register_cls_list(self, cls_and_handler, direct: bool = False) -> None:
         """Register a class to direct or singledispatch."""
         for cls, handler in cls_and_handler:

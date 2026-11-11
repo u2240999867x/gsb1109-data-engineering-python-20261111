@@ -175,6 +175,45 @@ Here's an example of using an unstructure hook factory to handle unstructuring [
 [1, 2]
 ```
 
+## Preparing Groups of Hooks
+
+Hooks are normally generated lazily, the first time a type is converted.
+When a set of record types reference each other, it can be useful to generate
+their hooks ahead of time instead, so any problems (for example, a custom hook
+factory raising) surface before conversion starts.
+
+{meth}`BaseConverter.prepare_group <cattrs.BaseConverter.prepare_group>`
+generates the structuring and unstructuring hooks for a group of types in
+isolation; the hooks only become visible to normal conversion once the
+returned {class}`cattrs.PreparedGroup` is published:
+
+```{doctest}
+
+>>> from attrs import define
+>>> from cattrs import Converter
+
+>>> @define
+... class Pong:
+...     value: int = 0
+
+>>> @define
+... class Ping:
+...     pong: Pong | None = None
+
+>>> c = Converter()
+>>> group = c.prepare_group(Ping, Pong)  # May raise; nothing is published then.
+>>> group.publish()  # The whole group becomes usable atomically.
+
+>>> c.structure({"pong": {"value": 1}}, Ping)
+Ping(pong=Pong(value=1))
+```
+
+If preparing the group fails, the converter is left untouched — no
+half-generated hooks are left behind — so the offending rules can be fixed and
+the preparation retried. Preparing never installs placeholder hooks, so other
+threads can keep converting with the converter safely in the meantime, and
+types outside the group keep using normal lazy generation.
+
 ## Using `cattrs.gen` Hook Factories
 
 The {mod}`cattrs.gen` module contains [hook factories](#hook-factories) for un/structuring _attrs_ classes, dataclasses and typed dicts.

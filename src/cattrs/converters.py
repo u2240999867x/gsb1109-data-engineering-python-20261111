@@ -9,6 +9,7 @@ from enum import Enum
 from inspect import Signature
 from inspect import signature as inspect_signature
 from pathlib import Path
+from threading import RLock
 from typing import Any, Optional, Tuple, TypeVar, overload
 
 from attrs import Attribute, resolve_types
@@ -121,7 +122,13 @@ from .typealiases import (
 )
 from .types import SimpleStructureHook
 
-__all__ = ["BaseConverter", "Converter", "GenConverter", "UnstructureStrategy"]
+__all__ = [
+    "BaseConverter",
+    "Converter",
+    "GenConverter",
+    "PreparedGroup",
+    "UnstructureStrategy",
+]
 
 T = TypeVar("T")
 V = TypeVar("V")
@@ -174,6 +181,55 @@ class UnstructureStrategy(Enum):
     AS_TUPLE = "astuple"
 
 
+class PreparedGroup:
+    """A group of hooks prepared by `BaseConverter.prepare_group`.
+
+    The prepared hooks are not visible to normal conversion until `publish`
+    is called. Preparing never installs placeholder hooks into the converter,
+    so other threads can keep using the converter normally in the meantime.
+
+    .. versionadded:: NEXT
+    """
+
+    __slots__ = ("_converter", "_structure_hooks", "_unstructure_hooks")
+
+    def __init__(
+        self,
+        converter: BaseConverter,
+        structure_hooks: dict[Any, StructureHook],
+        unstructure_hooks: dict[Any, UnstructureHook],
+    ) -> None:
+        self._converter = converter
+        self._structure_hooks = structure_hooks
+        self._unstructure_hooks = unstructure_hooks
+
+    @property
+    def structure_hooks(self) -> dict[Any, StructureHook]:
+        """The prepared structuring hooks, by type."""
+        return dict(self._structure_hooks)
+
+    @property
+    def unstructure_hooks(self) -> dict[Any, UnstructureHook]:
+        """The prepared unstructuring hooks, by type."""
+        return dict(self._unstructure_hooks)
+
+    def publish(self) -> None:
+        """Atomically publish the prepared hooks to the converter.
+
+        After publishing, normal conversion uses the prepared hooks.
+        Publishing may be done multiple times and is safe to do concurrently
+        with normal conversion.
+        """
+        converter = self._converter
+        with converter._prepare_lock:
+            converter._structure_func.register_cls_list(
+                list(self._structure_hooks.items()), direct=True
+            )
+            converter._unstructure_func.register_cls_list(
+                list(self._unstructure_hooks.items()), direct=True
+            )
+
+
 def _is_extended_factory(factory: Callable) -> bool:
     """Does this factory also accept a converter arg?"""
     # We use the original `inspect.signature` to not evaluate string
@@ -191,6 +247,7 @@ class BaseConverter:
     __slots__ = (
         "_dict_factory",
         "_prefer_attrib_converters",
+        "_prepare_lock",
         "_struct_copy_skip",
         "_structure_attrs",
         "_structure_func",
@@ -228,6 +285,7 @@ class BaseConverter:
         """
         unstruct_strat = UnstructureStrategy(unstruct_strat)
         self._prefer_attrib_converters = prefer_attrib_converters
+        self._prepare_lock = RLock()
 
         self.detailed_validation = detailed_validation
         self._union_struct_registry: dict[Any, Callable[[Any, type[T]], T]] = {}
@@ -661,6 +719,36 @@ class BaseConverter:
             if cache_result
             else self._structure_func.dispatch_without_caching(type)
         )
+
+    def prepare_group(self, *types: Any) -> PreparedGroup:
+        """Prepare (generate) hooks for a group of types, without publishing.
+
+        Both structuring and unstructuring hooks are generated for each type,
+        in an isolated staging area. If generation fails partway through (for
+        example, a custom hook factory raises), the converter is left
+        untouched; the offending rules can then be fixed and the preparation
+        retried, with no half-generated hooks left behind. Mutually-referencing
+        and self-referencing types are supported.
+
+        The returned `PreparedGroup` holds the generated hooks; call
+        `PreparedGroup.publish` to make them available to normal conversion
+        atomically. Until then, and if preparation fails, normal (lazy) hook
+        generation is completely unaffected.
+
+        :param types: The types to generate hooks for.
+
+        .. versionadded:: NEXT
+        """
+        with self._prepare_lock:
+            prev_structure = self._structure_func.begin_staging()
+            prev_unstructure = self._unstructure_func.begin_staging()
+            try:
+                structure_hooks = {t: self.get_structure_hook(t) for t in types}
+                unstructure_hooks = {t: self.get_unstructure_hook(t) for t in types}
+            finally:
+                self._structure_func.restore_state(prev_structure)
+                self._unstructure_func.restore_state(prev_unstructure)
+        return PreparedGroup(self, structure_hooks, unstructure_hooks)
 
     # Classes to Python primitives.
     def unstructure_attrs_asdict(self, obj: Any) -> dict[str, Any]:

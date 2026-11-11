@@ -13,6 +13,10 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- Add {meth}`BaseConverter.prepare_group` and {class}`PreparedGroup` for preparing hooks for a group of (possibly mutually-referencing) types ahead of time.
+  Hooks are generated in isolation and only become visible to normal conversion once the whole group is published via {meth}`PreparedGroup.publish`;
+  a failure partway through leaves no half-generated hooks behind, so the rules can be fixed and the preparation retried.
+
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 
