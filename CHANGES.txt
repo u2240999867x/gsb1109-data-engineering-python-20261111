@@ -1,3 +1,13 @@
+Version 1.0.9
+
+ * Add lenient feature reporting: loads_with_features/load_with_features
+   return the parsed object together with a list of FeatureUse records
+   (name and position of each non-standard syntax construct used)
+ * Add allowed_features argument to load/loads to restrict which lenient
+   syntax features are accepted; disallowed features raise
+   dirtyjson.Error at the position where they occur. The default remains
+   fully lenient.
+
 Version 1.0.0
 
  * Initial release, forked from simplejson 3.3.0

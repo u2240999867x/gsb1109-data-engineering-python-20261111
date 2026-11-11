@@ -74,11 +74,26 @@ Using Decimal instead of float::
     >>> dirtyjson.loads('1.1', parse_float=Decimal) == Decimal('1.1')
     True
 
+Finding out which lenient features a document relies on::
+
+    >>> obj, features = dirtyjson.loads_with_features("{key: 'value',}")
+    >>> obj == {u'key': u'value'}
+    True
+    >>> [(f.feature, f.line, f.column) for f in features]
+    [('unquoted_keys', 1, 2), ('single_quoted_strings', 1, 7), ('trailing_commas', 1, 14)]
+
+Restricting which lenient features are allowed::
+
+    >>> dirtyjson.loads("{key: 'value'}", allowed_features=['unquoted_keys'])
+    Traceback (most recent call last):
+        ...
+    dirtyjson.error.Error: Disallowed feature: single_quoted_strings: line 1 column 7 (char 6)
+
 
 Basic Usage
 -----------
 
-load(fp[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first_object]]]]])
+load(fp[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first_object[, allowed_features]]]]]])
 
    Performs the following translations in decoding by default:
 
@@ -147,7 +162,13 @@ load(fp[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first
    the first occurrence of either ``{`` or ``[``. This is very useful for
    reading an object from a JavaScript file.
 
-loads(s[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first_object[, start_index]]]]])
+   *allowed_features*, if specified, is an iterable of lenient syntax feature
+   names (see `Lenient features`_ below) that the document is permitted to
+   use. Encountering any other lenient feature raises `dirtyjson.Error` at
+   the position where the feature occurs. By default all features are
+   allowed, which keeps `load` as permissive as ever.
+
+loads(s[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first_object[, start_index[, allowed_features]]]]]]])
 
    Deserialize *s* (a `str` or `unicode` instance containing a JSON
    document) to a Python object. `dirtyjson.Error` will be
@@ -168,7 +189,76 @@ loads(s[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first
    This is very useful for reading an object from the middle of a JavaScript
    file.
 
+   *allowed_features*, if specified, is an iterable of lenient syntax feature
+   names (see `Lenient features`_ below) that the document is permitted to
+   use. Encountering any other lenient feature raises `dirtyjson.Error` at
+   the position where the feature occurs. By default all features are
+   allowed, which keeps `loads` as permissive as ever.
+
    The other arguments have the same meaning as in `load`.
+
+loads_with_features(s[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first_object[, start_index[, allowed_features]]]]]]])
+
+   Like `loads`, but returns a ``(obj, features)`` tuple. *features* is a
+   list of `FeatureUse` records, in document order, describing every lenient
+   (non-standard JSON) syntax feature the document relied on and where each
+   one occurs. This is the easiest way to find out why a file parses with
+   `dirtyjson` but not with the standard `json` module.
+
+load_with_features(fp[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first_object[, allowed_features]]]]]])
+
+   Like `load`, but returns a ``(obj, features)`` tuple as described for
+   `loads_with_features`.
+
+Lenient features
+----------------
+
+Every lenient (non-standard JSON) syntax feature understood by `dirtyjson`
+has a stable string name, also available as a constant in the
+`dirtyjson.features` module:
+
+single_quoted_strings
+
+   Strings delimited by single quotes, e.g. ``'value'``. A single quote
+   appearing inside a double-quoted string is ordinary content and does not
+   count as this feature.
+
+comments
+
+   ``//`` line comments and ``/* ... */`` block comments.
+
+trailing_commas
+
+   A comma directly before the closing ``}`` or ``]`` of an object or array.
+
+unquoted_keys
+
+   Object keys written as bare words, e.g. ``{key: 1}``.
+
+hexadecimal_numbers
+
+   Integers written in hexadecimal, e.g. ``0x2A``.
+
+octal_numbers
+
+   Integers written with a leading zero, e.g. ``077``.
+
+expressions
+
+   Arithmetic expressions used as values, e.g. ``[1+2]``.
+
+unescaped_control_characters
+
+   Literal (unescaped) control characters inside strings.
+
+`dirtyjson.ALL_FEATURES` is the set of all feature names and is the default
+``allowed_features`` value.
+
+FeatureUse()
+
+   A record of one use of a lenient feature, with the attributes ``feature``
+   (the feature name), ``pos`` (the 0-based character offset in the source
+   document), and ``line`` and ``column`` (both 1-based).
 
 Exceptions
 ----------

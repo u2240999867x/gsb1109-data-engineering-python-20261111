@@ -4,9 +4,13 @@ from __future__ import absolute_import
 import re
 import sys
 import struct
-from .compat import fromhex, u, text_type, binary_type, PY2, unichr, ascii
+from .compat import fromhex, u, text_type, binary_type, PY2, unichr, ascii, string_types
 from dirtyjson.attributed_containers import AttributedDict, AttributedList
-from .error import Error
+from .error import Error, linecol
+from .features import (ALL_FEATURES, SINGLE_QUOTED_STRINGS, COMMENTS,
+                       TRAILING_COMMAS, UNQUOTED_KEYS, HEXADECIMAL_NUMBERS,
+                       OCTAL_NUMBERS, EXPRESSIONS,
+                       UNESCAPED_CONTROL_CHARACTERS, FeatureUse)
 
 
 def _floatconstants():
@@ -90,15 +94,30 @@ class DirtyJSONLoader(object):
     It also understands ``NaN``, ``Infinity``, and ``-Infinity`` as
     their corresponding ``float`` values, which is outside the JSON spec.
 
+    Every use of a lenient (non-standard JSON) syntax feature is recorded
+    in ``self.features_used`` as a `FeatureUse`. If *allowed_features* is
+    given, only those features are accepted; encountering any other feature
+    raises `Error` at the position where the feature occurs.
+
     """
 
     def __init__(self, content, encoding=None, parse_float=None, parse_int=None,
-                 parse_constant=None):
+                 parse_constant=None, allowed_features=None):
         self.encoding = encoding or DEFAULT_ENCODING
         self.parse_float = parse_float or float
         self.parse_int = parse_int or int
         self.parse_constant = parse_constant or _CONSTANTS.__getitem__
         self.memo = {}
+        if allowed_features is None:
+            self.allowed_features = ALL_FEATURES
+        else:
+            if isinstance(allowed_features, string_types):
+                allowed_features = (allowed_features,)
+            unknown = [f for f in allowed_features if f not in ALL_FEATURES]
+            if unknown:
+                raise ValueError('Unknown feature(s): %s' % ', '.join(sorted(unknown)))
+            self.allowed_features = frozenset(allowed_features)
+        self.features_used = []
         if not PY2 and isinstance(content, binary_type):
             self.content = content.decode()
         else:
@@ -114,6 +133,12 @@ class DirtyJSONLoader(object):
         self.current_line_pos = 0
         self.pos = 0
         self.expecting = 'Expecting value'
+
+    def _note_feature(self, feature, pos):
+        if feature not in self.allowed_features:
+            raise Error('Disallowed feature: %s' % feature, self.content, pos)
+        line, column = linecol(self.content, pos)
+        self.features_used.append(FeatureUse(feature, pos, line, column))
 
     def _next_character(self):
         try:
@@ -141,6 +166,7 @@ class DirtyJSONLoader(object):
                 break
             two_chars = self.content[self.pos:self.pos + 2]
             if two_chars == '//' or two_chars == '/*':
+                self._note_feature(COMMENTS, self.pos)
                 terminator = '\n' if two_chars == '//' else '*/'
                 lf = self.content.index(terminator, self.pos)
                 if lf >= 0:
@@ -183,6 +209,12 @@ class DirtyJSONLoader(object):
         m = NUMBER_RE.match(self.content, self.pos)
         if m and (m.end() == len(self.content) or self.content[m.end()] not in '+-/*()'):
             integer, frac, exp = m.groups()
+            if not frac and not exp:
+                digits = integer.lstrip('-')
+                if digits[:2] == '0x':
+                    self._note_feature(HEXADECIMAL_NUMBERS, self.pos)
+                elif len(digits) > 1 and digits[0] == '0':
+                    self._note_feature(OCTAL_NUMBERS, self.pos)
             if frac or exp:
                 res = self.parse_float(integer + (frac or '') + (exp or ''))
             else:
@@ -198,6 +230,7 @@ class DirtyJSONLoader(object):
             return res
         m = EQUATION_RE.match(self.content, self.pos)
         if m:
+            self._note_feature(EXPRESSIONS, self.pos)
             try:
                 res = eval(m.string[m.pos:m.end()])
             except (SyntaxError, NameError):
@@ -216,6 +249,8 @@ class DirtyJSONLoader(object):
 
         Returns a tuple of the decoded string and the index of the character in
         string after the end quote."""
+        if terminating_character == "'":
+            self._note_feature(SINGLE_QUOTED_STRINGS, self.pos - 1)
         _m = STRINGCHUNK_DOUBLEQUOTE.match if terminating_character == '"' else STRINGCHUNK_SINGLEQUOTE.match
         chunks = []
         _append = chunks.append
@@ -237,6 +272,7 @@ class DirtyJSONLoader(object):
             if terminator == terminating_character:
                 break
             elif terminator != '\\':
+                self._note_feature(UNESCAPED_CONTROL_CHARACTERS, self.pos - 1)
                 _append(terminator)
                 continue
             try:
@@ -304,6 +340,7 @@ class DirtyJSONLoader(object):
                     raise Error(
                         "Expecting property name",
                         self.content, self.pos)
+                self._note_feature(UNQUOTED_KEYS, self.pos - 1)
                 self.pos = chunk.end()
                 key = chunk.groups()[0]
             key = memo_get(key, key)
@@ -324,7 +361,10 @@ class DirtyJSONLoader(object):
             elif nextchar != ',':
                 raise Error("Expecting ',' delimiter or '}'", self.content, self.pos - len(nextchar))
 
+            comma_pos = self.pos - 1
             nextchar = self._next_character_after_whitespace()
+            if nextchar == '}':
+                self._note_feature(TRAILING_COMMAS, comma_pos)
 
         return obj
 
@@ -349,7 +389,10 @@ class DirtyJSONLoader(object):
             elif nextchar != ',':
                 raise Error("Expecting ',' delimiter or ']'", self.content, self.pos - len(nextchar))
 
+            comma_pos = self.pos - 1
             nextchar = self._next_character_after_whitespace()
+            if nextchar == ']':
+                self._note_feature(TRAILING_COMMAS, comma_pos)
 
         return values
 
