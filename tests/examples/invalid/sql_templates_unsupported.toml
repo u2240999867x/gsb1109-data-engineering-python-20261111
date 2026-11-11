@@ -1,0 +1,18 @@
+# Boundary sample: everything here is supported TOML except one TOML 1.1
+# spelling. tomlkit intentionally accepts only lowercase inf/nan (see
+# test_parser.py::test_parser_rejects_non_lowercase_special_floats), so the
+# capitalized special float below must keep failing instead of being removed
+# to make the sample pass. The SQL templates beside it stay valid and are
+# checked on their own in test_sql_templates.py.
+dry_run = false
+threshold = NaN
+
+[query]
+mlb_cont = """SELECT id, name \
+  FROM users \
+  WHERE active = true"""
+slb_quote_boundary = "SELECT * FROM t WHERE note = \"雪 ☃\""
+sll_literal = 'SELECT \n AS backslash_n, "name" AS name FROM dual'
+mll_unicode = '''SELECT 城市, count(*) AS 数量
+  FROM 订单
+  WHERE 状态 = '已付款' '''

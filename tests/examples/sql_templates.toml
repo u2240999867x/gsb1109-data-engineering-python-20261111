@@ -1,0 +1,27 @@
+# SQL templates mixing multiline/basic/literal strings, with a simple switch
+# alongside them. Flipping the switch and re-dumping must leave every SQL
+# template byte-for-byte untouched while its decoded value stays checkable.
+dry_run = false
+
+[query]
+# multiline basic string: backslash line continuations trim the newline and
+# surrounding whitespace from the decoded value only (CRLF continuations are
+# covered separately in test_parser.py)
+mlb_cont = """SELECT id, name \
+  FROM users \
+  WHERE active = true \
+    AND city = '北京'"""
+# multiline basic string: quote sequences sit right against the closing
+# delimiter; five quotes keep two raw quotes in the body plus the closing
+# triple quote, and decode to a value ending in two quotes
+mlb_quote_boundary = """SELECT 'id' AS "id", count(*) AS "cnt"  """""
+# multiline literal string: backslash is literal, no escaping happens
+mll_literal = '''SELECT length('a\nb') AS len, '\t' AS tab FROM dual'''
+# single-line basic string: escaped quotes end right at the closing quote
+slb_quote_boundary = "SELECT * FROM t WHERE note = \"雪 ☃\" AND mark = ☃"
+# single-line literal string: backslash and double quotes stay raw
+sll_literal = 'SELECT \n AS backslash_n, "name" AS name FROM dual'
+# multiline literal string spanning lines with non-ASCII identifiers
+mll_unicode = '''SELECT 城市, count(*) AS 数量
+  FROM 订单
+  WHERE 状态 = '已付款' '''
