@@ -48,6 +48,17 @@ Index
    :special-members:
    :exclude-members: __weakref__
 
+Quota
+-----
+
+.. autoclass:: diskcache.Quota
+   :members:
+   :special-members:
+   :exclude-members: __weakref__
+
+.. autoclass:: diskcache.quota.Lease
+   :members:
+
 Recipes
 -------
 

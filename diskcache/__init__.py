@@ -19,6 +19,7 @@ from .core import (
 )
 from .fanout import FanoutCache
 from .persistent import Deque, Index
+from .quota import Quota
 from .recipes import (
     Averager,
     BoundedSemaphore,
@@ -43,6 +44,7 @@ __all__ = [
     'Index',
     'JSONDisk',
     'Lock',
+    'Quota',
     'RLock',
     'Timeout',
     'UNKNOWN',

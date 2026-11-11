@@ -4,6 +4,7 @@ import diskcache.core
 import diskcache.djangocache
 import diskcache.fanout
 import diskcache.persistent
+import diskcache.quota
 import diskcache.recipes
 
 
@@ -24,6 +25,11 @@ def test_fanout():
 
 def test_persistent():
     failures, _ = doctest.testmod(diskcache.persistent)
+    assert failures == 0
+
+
+def test_quota():
+    failures, _ = doctest.testmod(diskcache.quota)
     assert failures == 0
 
 
