@@ -73,6 +73,7 @@ Advanced processing
 
     agate.Table.bins
     agate.Table.denormalize
+    agate.Table.fixed_bins
     agate.Table.group_by
     agate.Table.homogenize
     agate.Table.join

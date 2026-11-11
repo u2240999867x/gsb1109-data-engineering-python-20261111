@@ -308,6 +308,7 @@ from agate.table.denormalize import denormalize
 from agate.table.distinct import distinct
 from agate.table.exclude import exclude
 from agate.table.find import find
+from agate.table.fixed_bins import fixed_bins
 from agate.table.from_csv import from_csv
 from agate.table.from_fixed import from_fixed
 from agate.table.from_json import from_json
@@ -341,6 +342,7 @@ Table.denormalize = denormalize
 Table.distinct = distinct
 Table.exclude = exclude
 Table.find = find
+Table.fixed_bins = fixed_bins
 Table.from_csv = from_csv
 Table.from_fixed = from_fixed
 Table.from_json = from_json

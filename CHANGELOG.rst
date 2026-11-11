@@ -1,6 +1,7 @@
 1.14.3 - Unreleased
 -------------------
 
+- feat: :class:`.BinSpec` defines a reusable set of fixed bin edges that can be saved to JSON and applied to any table with :meth:`.Table.fixed_bins`, so distributions stay comparable across runs. Underflow, overflow and null values are counted separately, edge inclusivity is configurable, labels can be renamed without changing assignment, and empty bins are preserved.
 - feat: :class:`.Median`, :class:`.Percentiles`, :class:`.Quartiles`, :class:`.Quintiles`, :class:`.Deciles` and :class:`.IQR` can be applied to :class:`.TimeDelta` columns, like :class:`.Sum` and :class:`.Mean`.
 - fix: :meth:`.Table.distinct` now deduplicates rows when ``key`` is a sequence of column names.
 - fix: :class:`.Rank` ranks null values last when ``reverse=True``.

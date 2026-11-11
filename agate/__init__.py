@@ -1,5 +1,6 @@
 import agate.csv_py3 as csv
 from agate.aggregations import *
+from agate.bin_spec import BinSpec
 from agate.columns import Column
 from agate.computations import *
 from agate.config import get_option, set_option, set_options
@@ -9,6 +10,7 @@ from agate.exceptions import *
 from agate.mapped_sequence import MappedSequence
 from agate.rows import Row
 from agate.table import Table
+from agate.table.fixed_bins import BinningResult
 from agate.tableset import TableSet
 from agate.testcase import AgateTestCase
 from agate.type_tester import TypeTester
