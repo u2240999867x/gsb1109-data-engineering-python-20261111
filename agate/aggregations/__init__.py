@@ -30,6 +30,9 @@ from agate.aggregations.median import Median
 from agate.aggregations.min import Min
 from agate.aggregations.mode import Mode
 from agate.aggregations.percentiles import Percentiles
+from agate.aggregations.psi import (DEFAULT_SMOOTHING, DEFAULT_UNKNOWN_LABEL, MISSING_EXCLUDE, MISSING_POLICIES,
+                                    MISSING_SEPARATE, MISSING_UNKNOWN, PSI, PSIBaseline, PSIResult,
+                                    PSI_STATUS_EMPTY_BATCH, PSI_STATUS_OK)
 from agate.aggregations.quartiles import Quartiles
 from agate.aggregations.quintiles import Quintiles
 from agate.aggregations.stdev import PopulationStDev, StDev

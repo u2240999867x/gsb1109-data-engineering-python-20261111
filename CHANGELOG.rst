@@ -1,6 +1,7 @@
 1.14.3 - Unreleased
 -------------------
 
+- feat: Add :class:`.PSIBaseline`, :class:`.PSI` and :class:`.PSIResult` for monitoring distribution drift with the Population Stability Index against a fixed baseline, including explicit policies for new categories, missing values, zero-frequency bins and an inconclusive status for empty batches.
 - feat: :class:`.Median`, :class:`.Percentiles`, :class:`.Quartiles`, :class:`.Quintiles`, :class:`.Deciles` and :class:`.IQR` can be applied to :class:`.TimeDelta` columns, like :class:`.Sum` and :class:`.Mean`.
 - fix: :meth:`.Table.distinct` now deduplicates rows when ``key`` is a sequence of column names.
 - fix: :class:`.Rank` ranks null values last when ``reverse=True``.

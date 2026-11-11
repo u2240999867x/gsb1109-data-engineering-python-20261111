@@ -69,3 +69,21 @@ def warn_unnamed_column(column_id, new_column_name):
         column_id,
         new_column_name
     ), UnnamedColumnWarning, stacklevel=2)
+
+
+class PSINewCategoryWarning(RuntimeWarning):  # pragma: no cover
+    """
+    Warning raised when a batch contains non-null values outside the categories
+    or numeric boundaries declared by a :class:`.PSIBaseline`. The values are
+    counted in the baseline's reserved unknown bin rather than discarded.
+    """
+    pass
+
+
+class PSIEmptyBatchWarning(RuntimeWarning):  # pragma: no cover
+    """
+    Warning raised when a batch has no usable observations for a
+    :class:`.PSI` calculation. PSI is not calculated and the result is
+    inconclusive, not evidence that no drift exists.
+    """
+    pass

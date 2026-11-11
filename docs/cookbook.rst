@@ -29,6 +29,7 @@ Welcome to the agate cookbook, a source of how-to's and use cases.
     cookbook/rank
     cookbook/charting
     cookbook/lookup
+    cookbook/monitoring
 
 Basics
 ======
@@ -63,5 +64,6 @@ Advanced techniques
 * `Ranking a sequence of data <cookbook/rank.html>`_
 * `Creating simple charts <cookbook/charting.html>`_
 * `Mapping columns to common lookup tables <cookbook/lookup.html>`_
+* `Monitoring distribution drift with PSI <cookbook/monitoring.html>`_
 
 Have a common use case that isn't covered? Please `submit an issue <https://github.com/wireservice/agate/issues/new>`_ on the GitHub repository.

@@ -54,6 +54,16 @@ Text aggregations
 
     agate.MaxLength
 
+Distribution monitoring
+-----------------------
+
+.. autosummary::
+    :nosignatures:
+
+    agate.PSI
+    agate.PSIBaseline
+    agate.PSIResult
+
 Detailed list
 -------------
 
@@ -81,3 +91,6 @@ Detailed list
 .. autoclass:: agate.Sum
 .. autoclass:: agate.Summary
 .. autoclass:: agate.Variance
+.. autoclass:: agate.PSIBaseline
+.. autoclass:: agate.PSI
+.. autoclass:: agate.PSIResult
