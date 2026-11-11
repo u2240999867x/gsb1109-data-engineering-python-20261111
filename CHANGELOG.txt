@@ -1,5 +1,8 @@
 === UNRELEASED
 
+* Added a configurable regex execution strategy for `pattern` and `patternProperties` via `regex_strategy` and `regex_timeout` arguments of `compile`, `validate` and `compile_to_code`; the `regex` strategy runs matches with the third-party `regex` engine and a per-match timeout to protect against catastrophic backtracking
+* Added `JsonSchemaRegexException`, raised when a pattern match is terminated or the selected engine does not support a pattern's syntax, instead of reporting the failure as an ordinary pattern mismatch
+* The compiled validator and the standalone generated code now expose the chosen `RegexStrategy`; generated code embeds the same engine, timeout and guarded pattern matching instead of falling back to the default engine
 * Fixed `$` in `patternProperties` matching before a trailing newline, which also made a `pattern` with the same regex accept a trailing newline
 
 === 2.22.3 (2026-11-01)

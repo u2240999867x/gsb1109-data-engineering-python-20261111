@@ -41,8 +41,26 @@ class CodeGeneratorDraft04(CodeGenerator):
         'uri': r'^\w+:(\/?\/?)[^\s]+\Z',
     }
 
-    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True):
-        super().__init__(definition, resolver, detailed_exceptions, fast_fail)
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        formats={},
+        use_default=True,
+        use_formats=True,
+        detailed_exceptions=True,
+        fast_fail=True,
+        regex_strategy=None,
+        regex_timeout=None,
+    ):
+        super().__init__(
+            definition,
+            resolver,
+            detailed_exceptions,
+            fast_fail,
+            regex_strategy=regex_strategy,
+            regex_timeout=regex_timeout,
+        )
         self._custom_formats = formats
         self._use_formats = use_formats
         self._use_default = use_default
@@ -290,13 +308,34 @@ class CodeGeneratorDraft04(CodeGenerator):
             with self.l('if {variable}_len > {maxLength}:'):
                 self.exc('{name} must be shorter than or equal to {maxLength} characters', rule='maxLength')
 
+    def _compile_schema_regex(self, pattern):
+        """
+        Compile a ``pattern``/``patternProperties`` regular expression with the
+        configured regex strategy and remember which engine compiled it. A
+        pattern the selected engine cannot compile is a bad definition for
+        that strategy, not a data mismatch.
+        """
+        end_of_string_fixed_pattern = DOLLAR_FINDER.sub(r'\\Z', pattern)
+        try:
+            compiled = self._regex_strategy.compile(end_of_string_fixed_pattern)
+        except self._regex_strategy.error_type as exc:
+            raise JsonSchemaDefinitionException(
+                'Regular expression {!r} is not supported by the {!r} regex strategy: {}'.format(
+                    pattern, self._regex_strategy.name, exc
+                )
+            ) from exc
+        self._store_compiled_regex(pattern, compiled, self._regex_strategy.module_name)
+        return compiled
+
     def generate_pattern(self):
         with self.l('if isinstance({variable}, str):'):
             pattern = self._definition['pattern']
             safe_pattern = self.e(pattern)
-            end_of_string_fixed_pattern = DOLLAR_FINDER.sub(r'\\Z', pattern)
-            self._compile_regexps[pattern] = re.compile(end_of_string_fixed_pattern)
-            with self.l('if not REGEX_PATTERNS[{}].search({variable}):', repr(pattern)):
+            self._compile_schema_regex(pattern)
+            with self.l(
+                'if not regex_pattern_search(REGEX_PATTERNS[{}], {variable}, {}):',
+                repr(pattern), repr(pattern),
+            ):
                 self.exc('{name} must match pattern {}', safe_pattern, rule='pattern')
 
     def generate_format(self):
@@ -337,8 +376,9 @@ class CodeGeneratorDraft04(CodeGenerator):
 
     def _generate_format(self, format_name, regexp_name, regexp):
         if self._definition['format'] == format_name:
-            if not regexp_name in self._compile_regexps:
-                self._compile_regexps[regexp_name] = re.compile(regexp)
+            if regexp_name not in self._compile_regexps:
+                # Formats ship with the library and always use the stdlib engine.
+                self._store_compiled_regex(regexp_name, re.compile(regexp), 're')
             with self.l('if not REGEX_PATTERNS["{}"].match({variable}):', regexp_name):
                 self.exc('{name} must be {}', format_name, rule='format')
 
@@ -596,11 +636,13 @@ class CodeGeneratorDraft04(CodeGenerator):
             if pattern_prop_definition == {}:
                 return
             for pattern, definition in pattern_prop_definition.items():
-                end_of_string_fixed_pattern = DOLLAR_FINDER.sub(r'\\Z', pattern)
-                self._compile_regexps[pattern] = re.compile(end_of_string_fixed_pattern)
+                self._compile_schema_regex(pattern)
             with self.l('for {variable}_key, {variable}_val in {variable}.items():'):
                 for pattern, definition in self._definition['patternProperties'].items():
-                    with self.l('if REGEX_PATTERNS[{}].search({variable}_key):', repr(pattern)):
+                    with self.l(
+                        'if regex_pattern_search(REGEX_PATTERNS[{}], {variable}_key, {}):',
+                        repr(pattern), repr(pattern),
+                    ):
                         with self.l('if {variable}_key in {variable}_keys:'):
                             self.l('{variable}_keys.remove({variable}_key)')
                         self.generate_func_code_block(

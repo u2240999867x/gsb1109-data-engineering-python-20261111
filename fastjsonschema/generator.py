@@ -3,9 +3,15 @@ from contextlib import contextmanager
 from decimal import Decimal
 import re
 
-from .exceptions import JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
+from .exceptions import (
+    JsonSchemaDefinitionException,
+    JsonSchemaRegexException,
+    JsonSchemaValueException,
+    JsonSchemaValuesException,
+)
 from .indent import indent
 from .ref_resolver import RefResolver
+from .regex import REGEX_STRATEGY_STDLIB, REGEX_STRATEGY_REGEX, get_regex_strategy
 
 # Both mean "this subschema did not match": a subschema behind a $ref becomes its own
 # function, which reports through JsonSchemaValuesException while errors are collected.
@@ -34,12 +40,30 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        detailed_exceptions=True,
+        fast_fail=True,
+        regex_strategy=None,
+        regex_timeout=None,
+    ):
         self._code = []
         self._compile_regexps = {}
+        # Engine module name ('re' or 'regex') of every compiled pattern. It
+        # cannot be derived from the compiled object type because the third
+        # party engine exposes its patterns through the private ``_regex``
+        # module.
+        self._regex_engine_names = {}
         self._custom_formats = {}
         self._detailed_exceptions = detailed_exceptions
         self._fast_fail = fast_fail
+        self._regex_strategy = get_regex_strategy(regex_strategy, regex_timeout)
+        # Guard used by the generated validation code for pattern and
+        # patternProperties matching. Timeouts and unsupported syntax surface
+        # as JsonSchemaRegexException instead of a plain mismatch.
+        self._regex_pattern_search = _make_regex_pattern_search(self._regex_strategy)
 
         # Any extra library should be here to be imported only once.
         # Lines are imports to be printed in the file and objects
@@ -87,6 +111,14 @@ class CodeGenerator:
         return '\n'.join(self._code)
 
     @property
+    def regex_strategy(self):
+        """
+        Returns the :class:`~fastjsonschema.regex.RegexStrategy` used for
+        ``pattern`` and ``patternProperties`` regular expressions.
+        """
+        return self._regex_strategy
+
+    @property
     def global_state(self):
         """
         Returns global variables for generating function from ``func_code``. Includes
@@ -95,13 +127,27 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
-        return dict(
+        state = dict(
             **self._extra_imports_objects,
             REGEX_PATTERNS=self._compile_regexps,
             re=re,
+            regex_pattern_search=self._regex_pattern_search,
             JsonSchemaValueException=JsonSchemaValueException,
             JsonSchemaValuesException=JsonSchemaValuesException,
+            JsonSchemaRegexException=JsonSchemaRegexException,
         )
+        if REGEX_STRATEGY_REGEX in self._regex_engines:
+            import regex as regex_module
+            state['regex'] = regex_module
+        return state
+
+    @property
+    def _regex_engines(self):
+        return set(self._regex_engine_names.values())
+
+    def _store_compiled_regex(self, name, compiled, engine_name):
+        self._compile_regexps[name] = compiled
+        self._regex_engine_names[name] = engine_name
 
     @property
     def global_state_code(self):
@@ -111,19 +157,35 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
+        import_lines = list(self._extra_imports_lines)
+        # Format regular expressions are always compiled with the stdlib engine.
+        # Stored names are module names ('re' and 'regex'), not strategy names.
+        if 're' in self._regex_engines or not self._compile_regexps:
+            import_lines.insert(0, 'import re')
+        if REGEX_STRATEGY_REGEX in self._regex_engines:
+            import_lines.insert(0, 'import regex')
+        import_lines += [
+            'from fastjsonschema import (',
+            '    JsonSchemaValueException, JsonSchemaValuesException,',
+            '    JsonSchemaRegexException, RegexStrategy,',
+            ')',
+            '',
+            '',
+            "REGEX_STRATEGY = " + repr(self._regex_strategy),
+            '',
+        ]
         if not self._compile_regexps:
-            return '\n'.join(self._extra_imports_lines + [
-                'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
-                '',
-                '',
-            ])
-        return '\n'.join(self._extra_imports_lines + [
-            'import re',
-            'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
+            return '\n'.join(import_lines)
+        # The helper only guards schema patterns; format patterns call their
+        # compiled regex directly, so pick the engine that those patterns use.
+        if REGEX_STRATEGY_REGEX in self._regex_engines:
+            search_code = _regex_search_code(self._regex_strategy)
+        else:
+            search_code = _STDLIB_SEARCH_CODE
+        return '\n'.join(import_lines + [
+            'REGEX_PATTERNS = ' + serialize_regexes(self._compile_regexps, self._regex_engine_names),
             '',
-            '',
-            'REGEX_PATTERNS = ' + serialize_regexes(self._compile_regexps),
-            '',
+            search_code,
         ])
 
 
@@ -391,11 +453,16 @@ class CodeGenerator:
         self.l('{variable}_is_dict = isinstance({variable}, dict)')
 
 
-def serialize_regexes(patterns_dict):
+def serialize_regexes(patterns_dict, engine_names=None):
     # Unfortunately using `pprint.pformat` is causing errors
     # specially with big regexes
+    def engine_for(key):
+        if engine_names is None:
+            return 're'
+        return engine_names[key]
+
     regex_patterns = (
-        repr(k) + ": " + repr_regex(v)
+        repr(k) + ": " + repr_regex(v, engine_for(k))
         for k, v in patterns_dict.items()
     )
     return '{\n    ' + ",\n    ".join(regex_patterns) + "\n}"
@@ -422,8 +489,81 @@ def repr_default(value):
     return repr(value)
 
 
-def repr_regex(regex):
+def repr_regex(regex, engine_name='re'):
     all_flags = ("A", "I", "DEBUG", "L", "M", "S", "X")
-    flags = " | ".join(f"re.{f}" for f in all_flags if regex.flags & getattr(re, f))
+    flags = " | ".join(f"{engine_name}.{f}" for f in all_flags if regex.flags & getattr(re, f))
     flags = ", " + flags if flags else ""
-    return "re.compile({!r}{})".format(regex.pattern, flags)
+    return "{engine}.compile({!r}{flags})".format(regex.pattern, engine=engine_name, flags=flags)
+
+
+# Source of the pattern search helper embedded into standalone generated code.
+# It is the exact counterpart of ``_make_regex_pattern_search`` so a generated
+# file uses the strategy chosen at generation time instead of silently falling
+# back to the default engine. ``source_pattern`` is the pattern exactly as it
+# appears in the schema (before the ``$`` -> ``\\Z`` normalization).
+_STDLIB_SEARCH_CODE = """def regex_pattern_search(compiled, value, source_pattern=None):
+    pattern = source_pattern if source_pattern is not None else compiled.pattern
+    try:
+        return compiled.search(value)
+    except re.error as exc:
+        raise JsonSchemaRegexException(
+            'Regular expression ' + pattern + ' is not supported: ' + str(exc),
+            pattern=pattern,
+        ) from exc"""
+
+
+def _regex_search_code(strategy):
+    return """def regex_pattern_search(compiled, value, source_pattern=None):
+    pattern = source_pattern if source_pattern is not None else compiled.pattern
+    try:
+        return compiled.search(value, timeout={timeout!r})
+    except TimeoutError as exc:
+        raise JsonSchemaRegexException(
+            'Regular expression ' + pattern + ' was terminated after {timeout} seconds',
+            pattern=pattern,
+        ) from exc
+    except regex.error as exc:
+        raise JsonSchemaRegexException(
+            'Regular expression ' + pattern + ' is not supported: ' + str(exc),
+            pattern=pattern,
+        ) from exc""".format(timeout=strategy.timeout)
+
+
+def _make_regex_pattern_search(strategy):
+    """
+    Build the pattern search closure used by an in-process compiled validator.
+    Timeouts and unsupported syntax become JsonSchemaRegexException, so they
+    are never reported as an ordinary pattern mismatch.
+    """
+    if strategy.name == REGEX_STRATEGY_STDLIB:
+        def regex_pattern_search(compiled, value, source_pattern=None):
+            pattern = source_pattern if source_pattern is not None else compiled.pattern
+            try:
+                return compiled.search(value)
+            except re.error as exc:
+                raise JsonSchemaRegexException(
+                    'Regular expression {} is not supported: {}'.format(pattern, exc),
+                    pattern=pattern,
+                ) from exc
+        return regex_pattern_search
+
+    timeout = strategy.timeout
+    # Fail at compile time with a clear message when the optional dependency
+    # is missing, and bind the engine's error type for the runtime guard.
+    error_type = strategy.error_type
+
+    def regex_pattern_search(compiled, value, source_pattern=None):
+        pattern = source_pattern if source_pattern is not None else compiled.pattern
+        try:
+            return compiled.search(value, timeout=timeout)
+        except TimeoutError as exc:
+            raise JsonSchemaRegexException(
+                'Regular expression {} was terminated after {} seconds'.format(pattern, timeout),
+                pattern=pattern,
+            ) from exc
+        except error_type as exc:
+            raise JsonSchemaRegexException(
+                'Regular expression {} is not supported: {}'.format(pattern, exc),
+                pattern=pattern,
+            ) from exc
+    return regex_pattern_search

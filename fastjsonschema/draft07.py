@@ -28,9 +28,21 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
         use_default=True,
         use_formats=True,
         detailed_exceptions=True,
-        fast_fail=True
+        fast_fail=True,
+        regex_strategy=None,
+        regex_timeout=None,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(
+            definition,
+            resolver,
+            formats,
+            use_default,
+            use_formats,
+            detailed_exceptions,
+            fast_fail,
+            regex_strategy=regex_strategy,
+            regex_timeout=regex_timeout,
+        )
         # pylint: disable=duplicate-code
         self._json_keywords_to_function.update((
             ('if', self.generate_if_then_else),

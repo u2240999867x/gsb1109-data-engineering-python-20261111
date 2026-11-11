@@ -73,3 +73,21 @@ class JsonSchemaDefinitionException(JsonSchemaException):
     """
     Exception raised by generator of validation function.
     """
+
+
+class JsonSchemaRegexException(JsonSchemaException):
+    """
+    Exception raised when a controlled regular expression cannot be executed.
+
+    This is raised when a ``pattern`` or ``patternProperties`` regular
+    expression is terminated by the configured execution strategy (for example
+    a match timeout) or when the selected engine does not support its syntax.
+    It is deliberately not a :any:`JsonSchemaValueException`: an aborted or
+    unsupported regular expression means validation could not be performed, it
+    does not mean that the data failed to match the pattern.
+    """
+
+    def __init__(self, message: str, pattern: str | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.pattern = pattern
