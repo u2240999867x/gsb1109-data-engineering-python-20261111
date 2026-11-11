@@ -100,6 +100,47 @@ of your dict keys.  To do this you can use either of these options:
     >>> parsed.search(mydata,
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
+Static Field Requirements
+-------------------------
+
+If your data source only returns fields that you explicitly request (for
+example a field-selecting API), use ``jmespath.analyze`` to derive which
+paths an expression needs.  The analysis is purely static: it parses the
+expression and walks the AST without reading any data and without calling
+any function (including custom functions).
+
+.. code:: python
+
+    >>> import jmespath
+    >>> requirements = jmespath.analyze('foo.bar.baz')
+    >>> requirements.paths
+    ('foo', 'foo.bar', 'foo.bar.baz')
+    >>> requirements.unknowns
+    ()
+    >>> requirements.is_complete
+    True
+
+``paths`` are concrete paths that must be requested.  ``unknowns`` are
+paths below which the exact fields cannot be determined, because of a
+wildcard, a filter, a slice/flatten projection, or a dynamic expression
+such as a function or boolean branch.  The whole subtree rooted at each
+unknown path must be requested; ``'*'`` means the entire document.
+
+.. code:: python
+
+    >>> jmespath.analyze('users[*].name').unknowns
+    ('users',)
+    >>> jmespath.analyze('users[?age > `18`].name').unknowns
+    ('users',)
+    >>> jmespath.analyze('sort_by(users, &age)').unknowns
+    ('users',)
+    >>> jmespath.analyze('users[*].name').is_complete
+    False
+
+``is_complete`` only means that all requirements could be named as
+concrete paths.  When it is ``False``, requesting ``paths`` alone is not
+sufficient: every ``unknowns`` subtree must be requested as well.
+
 
 Custom Functions
 ~~~~~~~~~~~~~~~~

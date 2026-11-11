@@ -1,7 +1,10 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add ``jmespath.analyze()`` for read-only static field-requirement
+  analysis.  It lists concrete paths that must be requested and keeps
+  wildcard/filter/projection/function regions as unknown subtrees, without
+  reading data or calling functions.
 
 
 1.1.0

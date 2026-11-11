@@ -1,4 +1,5 @@
 from jmespath import parser
+from jmespath.analysis import FieldRequirement, analyze
 from jmespath.visitor import Options
 
 __version__ = '1.1.0'
