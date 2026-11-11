@@ -11,6 +11,7 @@ from toolz.itertoolz import (remove, groupby, merge_sorted,
                              nth, take, tail, drop, interpose, get,
                              rest, last, cons, frequencies,
                              reduceby, iterate, accumulate,
+                             segmented_accumulate,
                              sliding_window, count, partition,
                              partition_all, take_nth, pluck, join,
                              diff, topk, peek, peekn, random_sample)
@@ -323,6 +324,178 @@ def test_accumulate():
 
 def test_accumulate_works_on_consumable_iterables():
     assert list(accumulate(add, iter((1, 2, 3)))) == [1, 3, 6]
+
+
+def test_segmented_accumulate_resets_per_segment():
+    data = [{'batch': True, 'x': 1},
+            {'batch': False, 'x': 2},
+            {'batch': True, 'x': 3},
+            {'batch': False, 'x': 4}]
+    result = segmented_accumulate(
+        lambda rec: rec['batch'],
+        lambda acc, rec: acc + rec['x'],
+        data,
+        lambda: 0)
+    assert list(result) == [(1, 0), (3, 0), (3, 1), (7, 1)]
+
+
+def test_segmented_accumulate_first_item_is_boundary():
+    # A boundary on the first item simply opens segment 0.
+    result = segmented_accumulate(
+        lambda x: x == 0,
+        lambda acc, x: acc + 1,
+        [0, 1, 1],
+        lambda: 0)
+    assert list(result) == [(1, 0), (2, 0), (3, 0)]
+
+
+def test_segmented_accumulate_adjacent_boundaries():
+    # Each adjacent start boundary opens its own fresh segment.
+    result = segmented_accumulate(
+        lambda x: x == 0,
+        lambda acc, x: acc + 1,
+        [0, 0, 1, 0],
+        lambda: 0)
+    assert list(result) == [(1, 0), (1, 1), (2, 1), (1, 2)]
+
+
+def test_segmented_accumulate_boundary_end():
+    result = segmented_accumulate(
+        lambda x: x == '|',
+        lambda acc, x: acc + x,
+        ['a', '|', 'b', 'c', '|'],
+        lambda: '',
+        boundary='end')
+    assert list(result) == [('a', 0), ('a|', 0),
+                            ('b', 1), ('bc', 1), ('bc|', 1)]
+
+
+def test_segmented_accumulate_end_boundary_without_open_segment():
+    result = segmented_accumulate(
+        lambda x: x == '|',
+        lambda acc, x: acc + x,
+        ['|', 'a'],
+        lambda: '',
+        boundary='end')
+    assert raises(ValueError, lambda: list(result))
+
+    # Adjacent end-boundaries also have no segment to close.
+    result = segmented_accumulate(
+        lambda x: x == '|',
+        lambda acc, x: acc + x,
+        ['a', '|', '|'],
+        lambda: '',
+        boundary='end')
+    assert raises(ValueError, lambda: list(result))
+
+
+def test_segmented_accumulate_exclude_boundary():
+    result = segmented_accumulate(
+        lambda x: x == '|',
+        lambda acc, x: acc + x,
+        ['a', 'b', '|', 'c', '|', 'd'],
+        lambda: '',
+        include_boundary=False)
+    assert list(result) == [('a', 0), ('ab', 0), ('c', 1), ('d', 2)]
+
+    # Excluded cut markers at the start or adjacent to each other never
+    # trigger factory calls for empty segments.
+    factory_calls = []
+
+    def factory():
+        factory_calls.append(1)
+        return 0
+
+    result = segmented_accumulate(
+        lambda x: x == 0,
+        lambda acc, x: acc + x,
+        [0, 0, 1, 2, 0, 3],
+        factory,
+        include_boundary=False)
+    assert list(result) == [(1, 0), (3, 0), (3, 1)]
+    assert len(factory_calls) == 2
+
+
+def test_segmented_accumulate_excluded_end_boundary_never_raises():
+    result = segmented_accumulate(
+        lambda x: x == '|',
+        lambda acc, x: acc + x,
+        ['|', 'a', '|', '|', 'b'],
+        lambda: '',
+        boundary='end',
+        include_boundary=False)
+    assert list(result) == [('a', 0), ('b', 1)]
+
+
+def test_segmented_accumulate_factory_called_once_per_segment():
+    accumulators = []
+
+    def factory():
+        acc = []
+        accumulators.append(acc)
+        return acc
+
+    result = segmented_accumulate(
+        lambda x: x == 0,
+        lambda acc, x: acc + [x],
+        [0, 1, 0, 0, 2],
+        factory)
+    assert list(result) == [([0], 0), ([0, 1], 0),
+                            ([0], 1), ([0], 2), ([0, 2], 2)]
+    assert len(accumulators) == 3
+    # Every accumulator is a distinct object: no state leaks across batches.
+    assert len({id(acc) for acc in accumulators}) == 3
+
+
+def test_segmented_accumulate_propagates_binop_failure():
+    calls = []
+
+    def factory():
+        calls.append(1)
+        return 0
+
+    def binop(acc, item):
+        if item == 'boom':
+            raise RuntimeError('stream failure')
+        return acc + item
+
+    result = segmented_accumulate(
+        lambda x: x == 0,
+        binop,
+        [0, 1, 0, 'boom', 2, 0, 3],
+        factory)
+    assert raises(RuntimeError, lambda: list(result))
+    # The failed segment got its own fresh accumulator; later segments are
+    # never opened and the partial accumulator is discarded, not reused.
+    assert len(calls) == 2
+
+
+def test_segmented_accumulate_lazy_and_consumable():
+    factory_calls = []
+
+    def factory():
+        factory_calls.append(1)
+        return 0
+
+    result = segmented_accumulate(
+        lambda x: x == 0,
+        lambda acc, x: acc + 1,
+        iter([0, 1, 0, 1]),
+        factory)
+    iterator = iter(result)
+    assert next(iterator) == (1, 0)
+    assert len(factory_calls) == 1
+    assert list(iterator) == [(2, 0), (1, 1), (2, 1)]
+    assert len(factory_calls) == 2
+
+
+def test_segmented_accumulate_empty_and_invalid_boundary():
+    assert list(segmented_accumulate(
+        lambda x: True, lambda acc, x: acc, [], lambda: 0)) == []
+
+    assert raises(ValueError, lambda: list(segmented_accumulate(
+        lambda x: True, lambda acc, x: acc, [1], lambda: 0,
+        boundary='middle')))
 
 
 def test_sliding_window():

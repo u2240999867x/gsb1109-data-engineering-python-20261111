@@ -8,12 +8,14 @@ from collections.abc import Sequence
 from toolz.utils import no_default
 
 
-__all__ = ('remove', 'accumulate', 'groupby', 'merge_sorted', 'interleave',
-           'unique', 'isiterable', 'isdistinct', 'take', 'drop', 'take_nth',
-           'first', 'second', 'nth', 'last', 'get', 'concat', 'concatv',
-           'mapcat', 'cons', 'interpose', 'frequencies', 'reduceby', 'iterate',
-           'sliding_window', 'partition', 'partition_all', 'count', 'pluck',
-           'join', 'tail', 'diff', 'topk', 'peek', 'peekn', 'random_sample')
+__all__ = ('remove', 'accumulate', 'segmented_accumulate', 'groupby',
+           'merge_sorted', 'interleave', 'unique', 'isiterable',
+           'isdistinct', 'take', 'drop', 'take_nth', 'first', 'second',
+           'nth', 'last', 'get', 'concat', 'concatv', 'mapcat', 'cons',
+           'interpose', 'frequencies', 'reduceby', 'iterate',
+           'sliding_window', 'partition', 'partition_all', 'count',
+           'pluck', 'join', 'tail', 'diff', 'topk', 'peek', 'peekn',
+           'random_sample')
 
 
 def remove(predicate, seq):
@@ -66,6 +68,159 @@ def accumulate(binop, seq, initial=no_default):
     for elem in seq:
         result = binop(result, elem)
         yield result
+
+
+def segmented_accumulate(is_boundary, binop, seq, factory, *,
+                         boundary='start', include_boundary=True):
+    """ Accumulate within segments, resetting whenever a boundary is hit
+
+    A segmented version of :func:`accumulate` for streams whose elements
+    carry batch/segment start flags. The stream is scanned item by item; each
+    time ``is_boundary(item)`` is true a fresh segment begins. For every item
+    a ``(accumulator, segment_id)`` tuple is yielded, where ``segment_id`` is
+    the 0-based ordinal of the segment the item was assigned to.
+
+    The caller declares both boundary and initialization conventions:
+
+    * ``is_boundary(item)`` decides whether an item starts a new segment.
+      Boundary items may either close the previous segment
+      (``boundary='end'``) or open the next one (``boundary='start'``, the
+      default); see below.
+    * ``factory()`` builds the initial accumulator for a segment. It is
+      called exactly once per segment, so mutable state is never shared
+      with or reused from a previous segment.
+
+    Parameters
+    ----------
+    is_boundary : callable
+        Returns a truthy value for items that delimit segments.
+    binop : callable
+        Binary function ``binop(acc, item)`` used to fold an item into the
+        current accumulator.
+    seq : iterable
+        The stream to scan.
+    factory : callable
+        Zero-argument callable returning a fresh accumulator for each
+        segment.
+    boundary : {'start', 'end'}, keyword-only, optional
+        Controls which segment a boundary item belongs to:
+
+        * ``'start'`` (default): the boundary item starts the new segment,
+          so it is folded into the segment's freshly created accumulator.
+        * ``'end'``: the boundary item closes the current segment, so it is
+          folded into that segment's accumulator and the next item starts a
+          new segment.
+    include_boundary : bool, keyword-only, optional
+        If ``True`` (default) boundary items are emitted like any other
+        item. If ``False`` boundary items are consumed to mark the cut but
+        are not yielded.
+
+    Examples
+    --------
+    Records with an explicit batch-start flag, where the marker belongs to
+    the batch it opens:
+
+    >>> data = [{'batch': True,  'x': 1},
+    ...         {'batch': False, 'x': 2},
+    ...         {'batch': True,  'x': 3},
+    ...         {'batch': False, 'x': 4}]
+    >>> out = segmented_accumulate(
+    ...     lambda rec: rec['batch'],
+    ...     lambda acc, rec: acc + rec['x'],
+    ...     data,
+    ...     lambda: 0)
+    >>> list(out)
+    [(1, 0), (3, 0), (3, 1), (7, 1)]
+
+    The very first item may already be a boundary; with ``boundary='start'``
+    it simply opens segment 0. Two adjacent boundaries are equally valid:
+
+    >>> list(segmented_accumulate(
+    ...     lambda x: x == 0,
+    ...     lambda acc, x: acc + 1,
+    ...     [0, 0, 1, 0],
+    ...     lambda: 0))
+    [(1, 0), (1, 1), (2, 1), (1, 2)]
+
+    With ``boundary='end'`` the marker closes the previous segment, and a
+    segment is only created once its first non-marker item arrives:
+
+    >>> list(segmented_accumulate(
+    ...     lambda x: x == '|',
+    ...     lambda acc, x: acc + x,
+    ...     ['a', '|', 'b', 'c', '|'],
+    ...     lambda: '',
+    ...     boundary='end'))
+    [('a', 0), ('a|', 0), ('b', 1), ('bc', 1), ('bc|', 1)]
+
+    Boundary items can be consumed purely as cut markers:
+
+    >>> list(segmented_accumulate(
+    ...     lambda x: x == '|',
+    ...     lambda acc, x: acc + x,
+    ...     ['a', '|', 'b'],
+    ...     lambda: '',
+    ...     include_boundary=False))
+    [('a', 0), ('b', 1)]
+
+    If ``binop`` raises while processing an item, the exception propagates
+    to the caller and iteration stops; the partially built accumulator is
+    simply discarded with the failed segment.
+
+    With ``boundary='end'`` an included boundary item must have an open
+    segment to close; a leading boundary, or a second boundary immediately
+    after a closing one, raises ``ValueError`` rather than silently creating
+    an empty segment. Excluded boundary items (``include_boundary=False``)
+    never raise, as they are treated as pure cut markers.
+
+    See Also:
+        accumulate
+        recipes.partitionby
+    """
+    if boundary not in ('start', 'end'):
+        raise ValueError(
+            "boundary must be 'start' or 'end', not %r" % (boundary,))
+    seq = iter(seq)
+
+    # ``acc`` is ``no_default`` until the first segment is opened. Each
+    # segment is created lazily on the first item actually folded into it,
+    # so ``factory`` runs exactly once per emitted segment and mutable state
+    # is never carried over from a previous segment. ``pending`` marks that
+    # a boundary has cut the stream, so the next non-boundary item opens a
+    # fresh segment.
+    acc = no_default
+    segment_id = -1
+    pending = True
+
+    def open_segment():
+        return factory(), segment_id + 1
+
+    for item in seq:
+        if not is_boundary(item):
+            if acc is no_default or pending:
+                acc, segment_id = open_segment()
+                pending = False
+            acc = binop(acc, item)
+            yield acc, segment_id
+            continue
+
+        if boundary == 'end':
+            if include_boundary:
+                if acc is no_default or pending:
+                    raise ValueError(
+                        "boundary='end' boundary item has no open segment: "
+                        "%r" % (item,))
+                acc = binop(acc, item)
+                yield acc, segment_id
+            pending = True
+        else:  # boundary == 'start', validated above
+            if include_boundary:
+                acc, segment_id = open_segment()
+                pending = False
+                acc = binop(acc, item)
+                yield acc, segment_id
+            else:
+                pending = True
 
 
 def groupby(key, seq):

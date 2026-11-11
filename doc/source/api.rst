@@ -40,6 +40,7 @@ Itertoolz
    reduceby
    remove
    second
+   segmented_accumulate
    sliding_window
    tail
    take
