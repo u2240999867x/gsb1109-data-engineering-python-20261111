@@ -1,6 +1,7 @@
 === UNRELEASED
 
 * Fixed `$` in `patternProperties` matching before a trailing newline, which also made a `pattern` with the same regex accept a trailing newline
+* Added `use_decimal` option (on by default) evaluating numeric keywords (`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`) with exact decimal arithmetic; floats are interpreted as `Decimal(repr(value))`, so e.g. `{'multipleOf': 0.01}` accepts 19.99 and rejects 19.999 exactly, for negative, zero and very large coefficients alike, also in code exported with `compile_to_code`
 
 === 2.22.3 (2026-11-01)
 

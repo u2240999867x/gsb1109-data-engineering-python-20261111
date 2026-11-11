@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from contextlib import contextmanager
 from decimal import Decimal
+from fractions import Fraction
 import re
 
 from .exceptions import JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
@@ -46,9 +47,11 @@ class CodeGenerator:
         # key-value pair to pass to compile function directly.
         self._extra_imports_lines = [
             "from decimal import Decimal",
+            "from fractions import Fraction",
         ]
         self._extra_imports_objects = {
             "Decimal": Decimal,
+            "Fraction": Fraction,
         }
 
         self._variables = {}

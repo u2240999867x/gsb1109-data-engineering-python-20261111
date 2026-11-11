@@ -74,6 +74,12 @@ Note that there are some differences compared to JSON schema standard:
    as well. When you want to use dollar as regular character, you have to escape it (``\$``).
  * JSON schema says you can use keyword ``default`` for providing default values. This implementation
    uses that and always returns transformed input data.
+ * Numeric keywords (``minimum``, ``maximum``, ``exclusiveMinimum``, ``exclusiveMaximum``
+   and ``multipleOf``) are evaluated with exact decimal arithmetic by default: a ``float``
+   is interpreted as the decimal value of its shortest representation (``Decimal(repr(value))``),
+   so ``19.99`` is exactly 19.99 and ``{'multipleOf': 0.01}`` does not suffer from floating
+   point division errors. Pass ``use_decimal=False`` to :any:`compile` for plain float
+   comparisons instead.
 
 Usage
 *****
@@ -149,6 +155,7 @@ def validate(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    use_decimal: bool = True,
 ) -> Any:
     """
     Validation function for lazy programmers or for use cases when you need
@@ -169,7 +176,7 @@ def validate(
     :any:`compile` for details and security considerations when schemas are not
     fully trusted.
     """
-    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail)(data)
+    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail, use_decimal)(data)
 
 
 #TODO: Change use_default to False when upgrading to version 3.
@@ -182,6 +189,7 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    use_decimal: bool = True,
 ) -> Validator:
     """
     Generates validation function for validating JSON schema passed in ``definition``.
@@ -270,6 +278,19 @@ def compile(
     By default, the execution stops with the first validation error. If you need
     to collect all the errors, turn this off by passing `fast_fail=False`.
 
+    Numeric keywords (``minimum``, ``maximum``, ``exclusiveMinimum``,
+    ``exclusiveMaximum`` and ``multipleOf``) are by default evaluated with the
+    exact decimal policy (``use_decimal=True``): a ``float`` value stands for
+    the decimal number of its shortest representation, i.e. it is read as
+    ``Decimal(repr(value))``. For example ``19.99`` means exactly 19.99, not
+    its binary floating-point approximation, so ``{'multipleOf': 0.01}``
+    accepts 19.99 and rejects 19.999 exactly, with no epsilon involved. The
+    same rule applies to negative numbers, zero and very large coefficients,
+    and to limits written in the schema. Integers and ``decimal.Decimal``
+    values are used as they are. If you prefer raw speed over exactness, pass
+    ``use_decimal=False`` to compare with plain floats instead (where, for
+    example, ``19.01 / 0.01`` is ``1901.0000000000002``).
+
     Exception :any:`JsonSchemaDefinitionException` is raised when generating the
     code fails (bad definition).
 
@@ -288,6 +309,7 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        use_decimal,
     )
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
@@ -307,6 +329,7 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    use_decimal: bool = True,
 ) -> str:
     """
     Generates validation code for validating JSON schema passed in ``definition``.
@@ -327,6 +350,10 @@ def compile_to_code(
         echo "{'type': 'string'}" | python3 -m fastjsonschema > your_file.py
         python3 -m fastjsonschema "{'type': 'string'}" > your_file.py
 
+    The generated code is self-contained and behaves exactly like
+    :any:`compile` with the same options, including the exact decimal policy
+    controlled by ``use_decimal``.
+
     Exception :any:`JsonSchemaDefinitionException` is raised when generating the
     code fails (bad definition).
 
@@ -341,6 +368,7 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        use_decimal,
     )
     return (
         'VERSION = "' + VERSION + '"\n' +
@@ -357,6 +385,7 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    use_decimal: bool = True,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
     resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
     code_generator = _get_code_generator_class(definition)(
@@ -367,6 +396,7 @@ def _factory(
         use_formats=use_formats,
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
+        use_decimal=use_decimal,
     )
     return resolver, code_generator
 

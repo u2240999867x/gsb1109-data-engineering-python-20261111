@@ -125,6 +125,18 @@ def multiple_of_compiler(request):
     return generate
 
 
+@pytest.fixture(params=[compile, compile_to_code], ids=['compiled', 'generated'])
+def exact_compiler(request):
+    def generate(definition, **kwargs):
+        validator = request.param(definition, **kwargs)
+        if isinstance(validator, str):
+            namespace = {}
+            exec(validator, namespace)
+            return namespace['validate']
+        return validator
+    return generate
+
+
 @pytest.mark.parametrize('schema_version', ['04', '06', '07'])
 @pytest.mark.parametrize('fast_fail', [True, False])
 @pytest.mark.parametrize('divisor, value, valid', [
@@ -213,6 +225,99 @@ def test_multiple_of_float_1_5(asserter, value, expected):
         'type': 'number',
         'multipleOf': 0.01,
     }, value, expected)
+
+
+@pytest.mark.parametrize('schema_version', ['04', '06', '07'])
+@pytest.mark.parametrize('divisor, value, valid', [
+    (0.01, 19.99, True),
+    (0.01, -19.99, True),
+    (0.01, 0, True),
+    (0.01, 0.0, True),
+    (0.01, 0.01, True),
+    (0.01, 19.999, False),
+    (0.01, -19.999, False),
+    (0.01, 0.001, False),
+    (0.01, 123456789012345.67, True),
+    (0.01, 123456789.123456789, False),
+    (0.01, 10 ** 30, True),
+    (0.01, -(10 ** 30), True),
+    (0.01, 10 ** 30 + 1, True),
+    (0.07, 7 * 10 ** 400, True),
+    (0.07, 7 * 10 ** 400 + 1, False),
+    (0.07, -(7 * 10 ** 400 + 1), False),
+    (decimal.Decimal('0.01'), 19.99, True),
+    (decimal.Decimal('0.01'), 19.999, False),
+    (0.01, decimal.Decimal('19.99'), True),
+    (0.01, decimal.Decimal('19.999'), False),
+    (0.01, decimal.Decimal('-19.99'), True),
+], ids=[
+    'cents', 'negative-cents', 'zero-int', 'zero-float', 'one-cent',
+    'fraction-of-cent', 'negative-fraction-of-cent', 'milli',
+    'large-cents', 'large-fraction-of-cent',
+    'huge-coefficient', 'negative-huge-coefficient', 'huge-coefficient-plus-one',
+    'huge-multiple-of-7-cents', 'huge-nonmultiple-of-7-cents', 'negative-huge-nonmultiple-of-7-cents',
+    'decimal-divisor', 'decimal-divisor-nonmultiple',
+    'decimal-value', 'decimal-value-nonmultiple', 'negative-decimal-value',
+])
+def test_multiple_of_exact_decimal(exact_compiler, schema_version, divisor, value, valid):
+    validator = exact_compiler({
+        '$schema': 'http://json-schema.org/draft-{}/schema'.format(schema_version),
+        'multipleOf': divisor,
+    })
+    if valid:
+        assert validator(value) == value
+    else:
+        with pytest.raises(JsonSchemaValueException) as exc:
+            validator(value)
+        assert exc.value.rule == 'multipleOf'
+
+
+def test_multiple_of_without_decimal_uses_plain_floats(exact_compiler):
+    validator = exact_compiler({'multipleOf': 0.01}, use_decimal=False)
+    # 19.01 / 0.01 == 1901.0000000000002 in binary floating point.
+    with pytest.raises(JsonSchemaValueException):
+        validator(19.01)
+    assert validator(0.5) == 0.5
+
+
+@pytest.mark.parametrize('schema_version', ['04', '06', '07'])
+@pytest.mark.parametrize('definition, value, valid', [
+    ({'minimum': decimal.Decimal('0.3')}, 0.3, True),
+    ({'minimum': decimal.Decimal('0.3')}, 0.29, False),
+    ({'maximum': decimal.Decimal('0.1')}, 0.1, True),
+    ({'maximum': decimal.Decimal('0.1')}, 0.2, False),
+    ({'minimum': 0.1}, decimal.Decimal('0.1'), True),
+    ({'maximum': 0.3}, decimal.Decimal('0.3'), True),
+    ({'minimum': 0.01}, 0.01, True),
+    ({'minimum': 0.01}, 0.009, False),
+    ({'maximum': 0.01}, -0.01, True),
+    ({'minimum': -0.01, 'maximum': 0.01}, 0, True),
+])
+def test_minimum_maximum_exact_decimal(exact_compiler, schema_version, definition, value, valid):
+    definition['$schema'] = 'http://json-schema.org/draft-{}/schema'.format(schema_version)
+    validator = exact_compiler(definition)
+    if valid:
+        assert validator(value) == value
+    else:
+        with pytest.raises(JsonSchemaValueException):
+            validator(value)
+
+
+@pytest.mark.parametrize('definition, value, valid', [
+    ({'exclusiveMinimum': 0.01}, 0.01, False),
+    ({'exclusiveMinimum': 0.01}, 0.02, True),
+    ({'exclusiveMaximum': 0.01}, 0.01, False),
+    ({'exclusiveMaximum': 0.01}, -0.01, True),
+    ({'exclusiveMinimum': decimal.Decimal('0.3')}, 0.3, False),
+    ({'exclusiveMaximum': decimal.Decimal('0.1')}, 0.1, False),
+])
+def test_exclusive_minimum_maximum_exact_decimal(exact_compiler, definition, value, valid):
+    validator = exact_compiler(definition)
+    if valid:
+        assert validator(value) == value
+    else:
+        with pytest.raises(JsonSchemaValueException):
+            validator(value)
 
 
 @pytest.mark.parametrize('schema_version', (

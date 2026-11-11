@@ -41,11 +41,12 @@ class CodeGeneratorDraft04(CodeGenerator):
         'uri': r'^\w+:(\/?\/?)[^\s]+\Z',
     }
 
-    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True):
+    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True, use_decimal=True):
         super().__init__(definition, resolver, detailed_exceptions, fast_fail)
         self._custom_formats = formats
         self._use_formats = use_formats
         self._use_default = use_default
+        self._use_decimal = use_decimal
         self._json_keywords_to_function.update((
             ('type', self.generate_type),
             ('enum', self.generate_enum),
@@ -342,26 +343,53 @@ class CodeGeneratorDraft04(CodeGenerator):
             with self.l('if not REGEX_PATTERNS["{}"].match({variable}):', regexp_name):
                 self.exc('{name} must be {}', format_name, rule='format')
 
+    def _number_keyword_variable(self):
+        """
+        Variable as code for numeric keyword comparisons. With the exact
+        decimal policy (``use_decimal``), a float stands for the decimal
+        value of its repr, so it is converted through ``Decimal(repr(...))``
+        before comparing; ints and decimals are used as they are.
+        """
+        if not self._use_decimal:
+            return self._variable
+        self.l('{variable}_decimal = Decimal(repr({variable})) if isinstance({variable}, float) else {variable}')
+        return '{}_decimal'.format(self._variable)
+
+    def _number_keyword_limit(self, keyword):
+        """
+        Limit of a numeric keyword as code. With the exact decimal policy,
+        floats and decimals are written out as ``Decimal`` so the comparison
+        does not depend on binary floating point.
+        """
+        limit = self._definition[keyword]
+        if self._use_decimal and isinstance(limit, (float, decimal.Decimal)):
+            return 'Decimal({!r})'.format(str(limit))
+        return str(limit)
+
     def generate_minimum(self):
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
             if not isinstance(self._definition['minimum'], (int, float, decimal.Decimal)):
                 raise JsonSchemaDefinitionException('minimum must be a number')
+            variable = self._number_keyword_variable()
+            minimum = self._number_keyword_limit('minimum')
             if self._definition.get('exclusiveMinimum', False):
-                with self.l('if {variable} <= {minimum}:'):
+                with self.l('if {} <= {}:', variable, minimum):
                     self.exc('{name} must be bigger than {minimum}', rule='minimum')
             else:
-                with self.l('if {variable} < {minimum}:'):
+                with self.l('if {} < {}:', variable, minimum):
                     self.exc('{name} must be bigger than or equal to {minimum}', rule='minimum')
 
     def generate_maximum(self):
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
             if not isinstance(self._definition['maximum'], (int, float, decimal.Decimal)):
                 raise JsonSchemaDefinitionException('maximum must be a number')
+            variable = self._number_keyword_variable()
+            maximum = self._number_keyword_limit('maximum')
             if self._definition.get('exclusiveMaximum', False):
-                with self.l('if {variable} >= {maximum}:'):
+                with self.l('if {} >= {}:', variable, maximum):
                     self.exc('{name} must be smaller than {maximum}', rule='maximum')
             else:
-                with self.l('if {variable} > {maximum}:'):
+                with self.l('if {} > {}:', variable, maximum):
                     self.exc('{name} must be smaller than or equal to {maximum}', rule='maximum')
 
     def generate_multiple_of(self):
@@ -373,17 +401,22 @@ class CodeGeneratorDraft04(CodeGenerator):
                 with self.l('if {variable} % {multipleOf} != 0:'):
                     self.exc('{name} must be multiple of {multipleOf}', rule='multipleOf')
             with self.l('else:'):
-                # For proper multiplication check of floats we need to use decimals,
-                # because for example 19.01 / 0.01 = 1901.0000000000002.
-                if isinstance(self._definition['multipleOf'], float):
-                    self.l('quotient = Decimal(repr({variable})) / Decimal(repr({multipleOf}))')
+                if self._use_decimal:
+                    # Exact decimal policy: fractions cannot lose precision or
+                    # round a non-integer quotient to an integer, however big
+                    # the coefficient is (e.g. 19.01 / 0.01 is exactly 1901).
+                    variable = self._number_keyword_variable()
+                    multiple_of = self._number_keyword_limit('multipleOf')
+                    self.l('quotient = Fraction({}) / Fraction({})', variable, multiple_of)
+                    with self.l('if quotient.denominator != 1:'):
+                        self.exc('{name} must be multiple of {multipleOf}', rule='multipleOf')
                 else:
                     self.l('quotient = {variable} / {multipleOf}')
-                with self.l('if int(quotient) != quotient:'):
-                    self.exc('{name} must be multiple of {multipleOf}', rule='multipleOf')
-                # For example, 1e308 / 0.123456789
-                with self.l('if {variable} / {multipleOf} == float("inf"):'):
-                    self.exc('inifinity reached', rule='multipleOf')
+                    with self.l('if int(quotient) != quotient:'):
+                        self.exc('{name} must be multiple of {multipleOf}', rule='multipleOf')
+                    # For example, 1e308 / 0.123456789
+                    with self.l('if {variable} / {multipleOf} == float("inf"):'):
+                        self.exc('inifinity reached', rule='multipleOf')
 
     def generate_min_items(self):
         self.create_variable_is_list()
