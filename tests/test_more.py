@@ -7198,6 +7198,219 @@ class TestConcurrentTee(TestCase):
             mi.concurrent_tee(non_concurrent_source, n=-1)  # Negative n
 
 
+class TestBoundedTee(TestCase):
+    def test_basic_equivalence(self):
+        for n in (1, 2, 5):
+            branches = mi.bounded_tee(range(100), n=n, lag=100)
+            self.assertEqual(len(branches), n)
+            for branch in branches:
+                self.assertEqual(list(branch), list(range(100)))
+
+    def test_interleaved_consumption(self):
+        branches = mi.bounded_tee(range(50), n=3, lag=2)
+        results = [[] for _ in branches]
+        active = list(range(3))
+        while active:
+            for index in active[:]:
+                try:
+                    results[index].append(next(branches[index]))
+                except mi.LagLimitReached:
+                    pass
+                except StopIteration:
+                    active.remove(index)
+        self.assertEqual(results, [list(range(50))] * 3)
+
+    def test_lag_limit_blocks_fast_branch(self):
+        fast, slow = mi.bounded_tee(range(20), n=2, lag=3)
+        # Up to lag + 1 items may be consumed while the other branch stalls.
+        self.assertEqual([next(fast) for _ in range(4)], [0, 1, 2, 3])
+        with self.assertRaises(mi.LagLimitReached):
+            next(fast)
+        # Repeated attempts keep failing and never pull from the source.
+        with self.assertRaises(mi.LagLimitReached):
+            next(fast)
+        self.assertEqual(next(slow), 0)
+        self.assertEqual(next(fast), 4)
+
+    def test_blocked_branch_does_not_pull_source(self):
+        produced = []
+
+        def source():
+            for value in range(100):
+                produced.append(value)
+                yield value
+
+        fast, slow = mi.bounded_tee(source(), n=2, lag=5)
+        for _ in range(6):
+            next(fast)
+        with self.assertRaises(mi.LagLimitReached):
+            next(fast)
+        self.assertEqual(len(produced), 6)
+        # The slow branch catches up; the fast branch resumes pulling.
+        for _ in range(2):
+            next(slow)
+        self.assertEqual(next(fast), 6)
+        self.assertEqual(len(produced), 7)
+
+    def test_lag_zero_requires_strict_alternation(self):
+        first, second = mi.bounded_tee(range(6), n=2, lag=0)
+        self.assertEqual(next(first), 0)
+        with self.assertRaises(mi.LagLimitReached):
+            next(first)
+        self.assertEqual(next(second), 0)
+        self.assertEqual(next(first), 1)
+
+    def test_lag_limit_is_runtime_error(self):
+        self.assertTrue(issubclass(mi.LagLimitReached, RuntimeError))
+
+    def test_explicit_close_unblocks_other_branches(self):
+        fast, slow = mi.bounded_tee(range(100), n=2, lag=1)
+        next(fast)
+        next(fast)
+        slow.close()
+        self.assertEqual(list(fast), list(range(2, 100)))
+        # A closed branch behaves like an exhausted iterator.
+        with self.assertRaises(StopIteration):
+            next(slow)
+        # Closing again is harmless.
+        slow.close()
+
+    def test_garbage_collected_branch_unblocks_others(self):
+        fast, slow = mi.bounded_tee(range(100), n=2, lag=0)
+        next(fast)
+        with self.assertRaises(mi.LagLimitReached):
+            next(fast)
+        watcher = weakref.ref(slow)
+        del slow
+        gc.collect()
+        self.assertIsNone(watcher())
+        self.assertEqual(list(fast), list(range(1, 100)))
+
+    def test_closing_last_branch_closes_source(self):
+        closed = Event()
+
+        def source():
+            try:
+                yield from range(10)
+            finally:
+                closed.set()
+
+        first, second = mi.bounded_tee(source(), n=2, lag=5)
+        next(first)
+        first.close()
+        self.assertFalse(closed.is_set())
+        second.close()
+        self.assertTrue(closed.is_set())
+
+    def test_source_exception_raised_at_each_branch_position(self):
+        class Boom(Exception):
+            pass
+
+        def source():
+            yield 1
+            yield 2
+            raise Boom('kaboom')
+
+        first, second = mi.bounded_tee(source(), n=2, lag=5)
+        self.assertEqual(next(first), 1)
+        self.assertEqual(next(first), 2)
+        with self.assertRaises(Boom) as first_context:
+            next(first)
+        self.assertEqual(next(second), 1)
+        self.assertEqual(next(second), 2)
+        with self.assertRaises(Boom) as second_context:
+            next(second)
+        # The same exception object is shared, never re-wrapped or copied.
+        self.assertIs(second_context.exception, first_context.exception)
+        with self.assertRaises(Boom) as repeat_context:
+            next(first)
+        self.assertIs(repeat_context.exception, first_context.exception)
+
+    def test_exception_waits_behind_buffered_items(self):
+        class Boom(Exception):
+            pass
+
+        def source():
+            yield from range(5)
+            raise Boom
+
+        first, second = mi.bounded_tee(source(), n=2, lag=10)
+        for _ in range(5):
+            next(first)
+        with self.assertRaises(Boom):
+            next(first)
+        # The slow branch still receives every buffered item first.
+        self.assertEqual([next(second) for _ in range(5)], list(range(5)))
+        with self.assertRaises(Boom):
+            next(second)
+
+    def test_stop_iteration_at_each_branch_position(self):
+        first, second = mi.bounded_tee(range(3), n=2, lag=10)
+        self.assertEqual(list(first), [0, 1, 2])
+        with self.assertRaises(StopIteration):
+            next(first)
+        self.assertEqual(list(second), [0, 1, 2])
+        with self.assertRaises(StopIteration):
+            next(second)
+
+    def test_three_branches_governed_by_slowest(self):
+        first, second, third = mi.bounded_tee(range(50), n=3, lag=4)
+        for _ in range(5):
+            next(first)
+        with self.assertRaises(mi.LagLimitReached):
+            next(first)
+        for _ in range(3):
+            next(third)
+        # The middle branch is still at position zero, so first stays blocked.
+        with self.assertRaises(mi.LagLimitReached):
+            next(first)
+        next(second)
+        self.assertEqual(next(first), 5)
+
+    def test_empty_source(self):
+        first, second = mi.bounded_tee([], n=2, lag=0)
+        self.assertEqual(list(first), [])
+        self.assertEqual(list(second), [])
+
+    def test_argument_edge_cases(self):
+        self.assertEqual(mi.bounded_tee(range(5), n=0), ())
+        (solo,) = mi.bounded_tee(range(5), n=1, lag=0)
+        self.assertEqual(list(solo), [0, 1, 2, 3, 4])
+        with self.assertRaises(ValueError):
+            mi.bounded_tee(range(5), n=-1)
+        with self.assertRaises(ValueError):
+            mi.bounded_tee(range(5), lag=-1)
+
+    def test_concurrent_consumers(self):
+        limit = 10**4
+        num_threads = 20
+        branches = mi.bounded_tee(range(limit), n=num_threads, lag=25)
+        results = [None] * num_threads
+
+        def consumer(index, branch, delay):
+            output = []
+            while True:
+                try:
+                    output.append(next(branch))
+                except mi.LagLimitReached:
+                    sleep(delay)
+                except StopIteration:
+                    break
+            results[index] = output
+
+        threads = [
+            Thread(target=consumer, args=(index, branch, (index % 3) * 0.001))
+            for index, branch in enumerate(branches)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        expected = list(range(limit))
+        self.assertTrue(all(result == expected for result in results))
+
+
 def grow_to_window(data, maxlen):
     "Return growing window views upto maxlen."
     for j in range(1, len(data) + 1):

@@ -2,6 +2,7 @@ __lazy_modules__ = frozenset({'queue', 'threading'})
 
 import math
 import types
+import weakref
 
 from collections import Counter, defaultdict, deque
 from collections.abc import Sequence
@@ -60,6 +61,7 @@ from .recipes import (
 
 __all__ = [
     'AbortThread',
+    'LagLimitReached',
     'SequenceView',
     'adjacent',
     'all_unique',
@@ -67,6 +69,7 @@ __all__ = [
     'always_reversible',
     'argmax',
     'argmin',
+    'bounded_tee',
     'bucket',
     'callback_iter',
     'chunked',
@@ -5593,6 +5596,190 @@ class _concurrent_tee:
                     link[1] = [None, None]
         value, self.link = link
         return value
+
+
+class LagLimitReached(RuntimeError):
+    """Raised on a branch of :func:`bounded_tee` that is too far ahead.
+
+    A fast branch raises this when the number of items it has consumed
+    exceeds the slowest live branch by more than the configured lag limit.
+    The branch does not pull from the source while it is ahead; once the
+    slower branches catch up (or close) the branch yields normally again.
+
+    Subclasses :exc:`RuntimeError`, so it is recognizable without being
+    confused with exceptions raised by the wrapped iterable.
+    """
+
+
+def bounded_tee(iterable, n=2, lag=100):
+    """Variant of :func:`itertools.tee` with a bound on inter-branch lag.
+
+    Splits *iterable* into *n* independent iterators whose relative
+    progress is capped at *lag* items. If a branch gets more than *lag*
+    items ahead of the slowest live branch, its next ``__next__`` call
+    raises :class:`LagLimitReached` instead of pulling more data from the
+    source. Once the slower branches consume enough to catch up (or close),
+    the fast branch yields data again.
+
+    Unlike an unbounded tee, a stalled branch can therefore never make the
+    buffered data grow without limit. A branch that is closed (garbage
+    collected or explicitly closed) stops counting as a laggard, so it can
+    never hold the remaining branches back.
+
+    When the source is exhausted, every branch raises :class:`StopIteration`
+    at its own end position. If the source raises an exception, every still
+    open branch raises that same exception object at the same logical
+    position; the exception is never re-wrapped or duplicated. Exhausted
+    and closed branches stay silent afterwards, matching ``itertools.tee``
+    semantics.
+
+    The new iterators are thread-safe as long as each iterator is consumed
+    from a single thread.
+    """
+    if n < 0:
+        raise ValueError('n must be non-negative')
+    if lag < 0:
+        raise ValueError('lag must be non-negative')
+    if n == 0:
+        return ()
+    coordinator = _BoundedTeeCoordinator(iter(iterable), lag)
+    branches = tuple(_BoundedTeeBranch(coordinator) for _ in range(n))
+    coordinator.branches = [weakref.ref(branch) for branch in branches]
+    return branches
+
+
+class _BoundedTeeCoordinator:
+    """Shared state for the branches of a single :func:`bounded_tee`."""
+
+    __slots__ = (
+        'lock',
+        'source',
+        'lag',
+        'consumed',
+        'buffer',
+        'open',
+        'error',
+        'branches',
+    )
+
+    def __init__(self, source, lag):
+        self.lock = Lock()
+        self.source = source
+        self.lag = lag
+        self.consumed = 0
+        self.buffer = deque()
+        self.open = 0
+        self.error = None
+        self.branches = []
+
+    def pull_locked(self):
+        """Fetch one item from the source, recording exhaustion or errors."""
+        try:
+            item = next(self.source)
+        except BaseException as exc:
+            self.error = exc
+            return False
+        self.buffer.append(item)
+        self.consumed += 1
+        return True
+
+
+class _BoundedTeeBranch:
+    """One iterator produced by :func:`bounded_tee`."""
+
+    __slots__ = ('_coordinator', '_position', '_closed', '__weakref__')
+
+    def __init__(self, coordinator):
+        self._coordinator = coordinator
+        self._position = 0
+        self._closed = False
+        coordinator.open += 1
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        coordinator = self._coordinator
+        with coordinator.lock:
+            if self._closed:
+                raise StopIteration
+            if self._position < coordinator.consumed:
+                item = self._buffered_item_locked()
+                self._position += 1
+                self._trim_locked()
+                return item
+            if coordinator.error is not None:
+                raise coordinator.error
+            if self._is_ahead_locked():
+                raise LagLimitReached(
+                    f'branch is {self._position - self._min_position_locked()} '
+                    f'items ahead; lag limit is {coordinator.lag}'
+                )
+            if not coordinator.pull_locked():
+                raise coordinator.error
+            item = coordinator.buffer[-1]
+            self._position += 1
+            self._trim_locked()
+            return item
+
+    def _buffered_item_locked(self):
+        coordinator = self._coordinator
+        start = coordinator.consumed - len(coordinator.buffer)
+        return coordinator.buffer[self._position - start]
+
+    def _is_ahead_locked(self):
+        coordinator = self._coordinator
+        if coordinator.open <= 1:
+            return False
+        return self._position - self._min_position_locked() > coordinator.lag
+
+    def _min_position_locked(self):
+        # Only live, open branches count as laggards; dead weak references
+        # are compacted away while holding the shared lock.
+        coordinator = self._coordinator
+        live = []
+        minimum = self._position
+        for ref in coordinator.branches:
+            branch = ref()
+            if branch is None or branch._closed:
+                continue
+            live.append(ref)
+            if branch._position < minimum:
+                minimum = branch._position
+        coordinator.branches = live
+        return minimum
+
+    def _trim_locked(self):
+        coordinator = self._coordinator
+        min_position = self._min_position_locked()
+        while (
+            coordinator.buffer
+            and (coordinator.consumed - len(coordinator.buffer)) < min_position
+        ):
+            coordinator.buffer.popleft()
+
+    def close(self):
+        """Detach this branch without affecting the others."""
+        coordinator = self._coordinator
+        with coordinator.lock:
+            if self._closed:
+                return
+            self._closed = True
+            coordinator.open -= 1
+            self._trim_locked()
+            if coordinator.open == 0:
+                coordinator.buffer.clear()
+                with suppress(Exception):
+                    coordinator.source.close()
+
+    def __del__(self):
+        coordinator = getattr(self, '_coordinator', None)
+        if coordinator is None:
+            return
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def subfactorial(n):

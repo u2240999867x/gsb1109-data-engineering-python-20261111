@@ -33,6 +33,7 @@ from _typeshed import (
 
 __all__ = [
     'AbortThread',
+    'LagLimitReached',
     'SequenceView',
     'adjacent',
     'all_unique',
@@ -40,6 +41,7 @@ __all__ = [
     'always_reversible',
     'argmax',
     'argmin',
+    'bounded_tee',
     'bucket',
     'callback_iter',
     'chunked',
@@ -1011,6 +1013,11 @@ class serialize(Generic[_T_co], Iterator[_T_co]):
     def throw(self, *args: object) -> _T_co: ...
     def close(self) -> None: ...
 
+class LagLimitReached(RuntimeError): ...
+
+def bounded_tee(
+    iterable: Iterable[_T], n: int = ..., lag: int = ...
+) -> tuple[Iterator[_T], ...]: ...
 def concurrent_tee(
     iterable: Iterable[_T], n: int = ...
 ) -> tuple[Iterator[_T], ...]: ...

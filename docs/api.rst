@@ -141,6 +141,8 @@ These tools support thread-safe concurrency.
 
 ----
 
+.. autofunction:: bounded_tee
+.. autoexception:: LagLimitReached
 .. autofunction:: concurrent_tee
 .. autoclass:: serialize
 .. autofunction:: synchronized

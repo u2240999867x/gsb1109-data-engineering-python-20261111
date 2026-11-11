@@ -68,6 +68,8 @@ Python iterables.
 |                        | `value_chain <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.value_chain>`_,                                                                       |
 |                        | `partial_product <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.partial_product>`_                                                                |
 +------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|                        | `bounded_tee <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.bounded_tee>`_,                                                                       |
+|                        | `LagLimitReached <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.LagLimitReached>`_,                                                               |
 | Concurrency            | `concurrent_tee <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.concurrent_tee>`_,                                                                 |
 |                        | `serialize <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.serialize>`_,                                                                           |
 |                        | `synchronized <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.synchronized>`_                                                                      |
