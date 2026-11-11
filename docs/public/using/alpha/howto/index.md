@@ -6,6 +6,7 @@ title: How to...
 - [Either/or schema validation of different, equally valid different kinds of YAML](either-or-validation)
 - [Labeling exceptions](label-exceptions)
 - [Merge YAML documents](merge-yaml-documents)
+- [Preview a schema migration](schema-migration-preview)
 - [Revalidate an already validated document](revalidation)
 - [Reading in YAML, editing it and writing it back out](roundtripping)
 - [Get line numbers of YAML elements](what-line)

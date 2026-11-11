@@ -44,6 +44,15 @@ from strictyaml.ruamel import YAMLError
 from strictyaml.exceptions import StrictYAMLError
 from strictyaml.exceptions import YAMLValidationError
 
+# Schema migration preview
+from strictyaml.migration import preview_migration
+from strictyaml.migration import MigrationPreview
+from strictyaml.migration import TypeChange
+from strictyaml.migration import DefaultChange
+from strictyaml.migration import RejectedPosition
+from strictyaml.migration import LoadFailure
+from strictyaml.migration import MigrationApplyError
+
 # Disallowed token exceptions
 from strictyaml.exceptions import DisallowedToken
 
