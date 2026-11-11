@@ -238,6 +238,9 @@ These tools yield combinatorial arrangements of items from iterables.
 
 .. autofunction:: distinct_permutations
 .. autofunction:: distinct_combinations
+.. autofunction:: limited_combinations
+.. autofunction:: limited_combinations_count
+.. autofunction:: nth_limited_combination
 .. autofunction:: nth_combination_with_replacement
 .. autofunction:: circular_shifts
 .. autofunction:: partitions

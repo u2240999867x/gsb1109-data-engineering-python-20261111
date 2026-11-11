@@ -27,7 +27,7 @@ from itertools import (
     product,
     repeat,
 )
-from math import factorial
+from math import comb, factorial
 from operator import add, mul, itemgetter, not_
 from pickle import loads, dumps
 from random import Random, choices, random, randrange, seed
@@ -4715,6 +4715,200 @@ class DistinctCombinationsTests(TestCase):
 
     def test_empty(self):
         self.assertEqual(list(mi.distinct_combinations([], 2)), [])
+
+
+class LimitedCombinationsTests(TestCase):
+    def test_basic(self):
+        iterable = ['A', 'A', 'A', 'B', 'B']
+        actual = list(mi.limited_combinations(iterable, 4))
+        expected = [('A', 'A', 'A', 'B'), ('A', 'A', 'B', 'B')]
+        self.assertEqual(actual, expected)
+
+    def test_mapping(self):
+        actual = list(mi.limited_combinations({'A': 3, 'B': 2}, 4))
+        expected = [('A', 'A', 'A', 'B'), ('A', 'A', 'B', 'B')]
+        self.assertEqual(actual, expected)
+
+    def test_matches_distinct_combinations(self):
+        # When equal items are contiguous in the input, the output
+        # matches distinct_combinations
+        for iterable in [
+            (1, 2, 2, 3, 3, 3),  # In order
+            range(6),  # All distinct
+            'abbccc',  # Not numbers
+            'cccbba',  # Backward
+        ]:
+            for r in range(len(iterable)):
+                with self.subTest(iterable=iterable, r=r):
+                    actual = list(mi.limited_combinations(iterable, r))
+                    expected = list(mi.distinct_combinations(iterable, r))
+                    self.assertEqual(actual, expected)
+
+    def test_compositions(self):
+        # Each result is the composition (items grouped by first
+        # appearance) of the distinct position subsequences, emitted in
+        # lexicographic order
+        for iterable in ['mississippi', 'ABACABA', (2, 1, 2, 1, 3)]:
+            pool = list(iterable)
+            values = list(mi.unique_everseen(pool))
+            for r in range(len(pool) + 1):
+                with self.subTest(iterable=iterable, r=r):
+                    expected = {
+                        tuple(sorted(combo, key=values.index))
+                        for combo in combinations(pool, r)
+                    }
+                    expected = sorted(
+                        expected,
+                        key=lambda combo: tuple(map(values.index, combo)),
+                    )
+                    actual = list(mi.limited_combinations(iterable, r))
+                    self.assertEqual(actual, expected)
+
+    def test_input_permutations(self):
+        # Permuting the input may permute the output order, but not the
+        # set of compositions
+        base = ['A', 'A', 'A', 'B', 'B']
+        expected = {
+            frozenset(Counter(combo).items())
+            for combo in mi.limited_combinations(base, 4)
+        }
+        for permutation in mi.distinct_permutations(base):
+            with self.subTest(permutation=permutation):
+                actual = {
+                    frozenset(Counter(combo).items())
+                    for combo in mi.limited_combinations(permutation, 4)
+                }
+                self.assertEqual(actual, expected)
+
+    def test_zero_stock(self):
+        self.assertEqual(
+            list(mi.limited_combinations({'A': 3, 'B': 0}, 2)),
+            [('A', 'A')],
+        )
+        self.assertEqual(list(mi.limited_combinations([], 2)), [])
+        self.assertEqual(list(mi.limited_combinations([], 0)), [()])
+        self.assertEqual(list(mi.limited_combinations({'A': 0}, 0)), [()])
+
+    def test_impossible_quota(self):
+        self.assertEqual(list(mi.limited_combinations('AAB', 4)), [])
+        self.assertEqual(
+            list(mi.limited_combinations('AAB', 3)), [('A', 'A', 'B')]
+        )
+
+    def test_negative(self):
+        with self.assertRaises(ValueError):
+            list(mi.limited_combinations([], -1))
+        with self.assertRaises(ValueError):
+            list(mi.limited_combinations({'A': -1}, 1))
+
+    def test_unhashable(self):
+        actual = list(mi.limited_combinations([[0], [0], [1]], 2))
+        self.assertEqual(actual, [([0], [0]), ([0], [1])])
+
+
+class LimitedCombinationsCountTests(TestCase):
+    def test_basic(self):
+        self.assertEqual(mi.limited_combinations_count('AAABB', 4), 2)
+        self.assertEqual(mi.limited_combinations_count({'A': 3, 'B': 2}, 4), 2)
+
+    def test_matches_generator(self):
+        for iterable in ['mississippi', range(6), (1, 2, 2, 3, 3, 3)]:
+            for r in range(len(tuple(iterable)) + 2):
+                with self.subTest(iterable=iterable, r=r):
+                    actual = mi.limited_combinations_count(iterable, r)
+                    expected = len(list(mi.limited_combinations(iterable, r)))
+                    self.assertEqual(actual, expected)
+
+    def test_all_distinct(self):
+        self.assertEqual(
+            mi.limited_combinations_count(range(90), 4), comb(90, 4)
+        )
+
+    def test_zero_stock(self):
+        self.assertEqual(mi.limited_combinations_count({'A': 3, 'B': 0}, 2), 1)
+        self.assertEqual(mi.limited_combinations_count([], 0), 1)
+        self.assertEqual(mi.limited_combinations_count([], 2), 0)
+
+    def test_impossible_quota(self):
+        self.assertEqual(mi.limited_combinations_count('AAB', 4), 0)
+
+    def test_negative(self):
+        with self.assertRaises(ValueError):
+            mi.limited_combinations_count([], -1)
+        with self.assertRaises(ValueError):
+            mi.limited_combinations_count({'A': -1}, 1)
+
+
+class NthLimitedCombinationTests(TestCase):
+    def test_basic(self):
+        iterable = ['A', 'A', 'A', 'B', 'B']
+        expected = list(mi.limited_combinations(iterable, 4))
+        for index, combination in enumerate(expected):
+            with self.subTest(index=index):
+                self.assertEqual(
+                    mi.nth_limited_combination(iterable, 4, index),
+                    combination,
+                )
+
+    def test_mapping(self):
+        self.assertEqual(
+            mi.nth_limited_combination({'A': 3, 'B': 2}, 4, 0),
+            ('A', 'A', 'A', 'B'),
+        )
+        self.assertEqual(
+            mi.nth_limited_combination({'A': 3, 'B': 2}, 4, 1),
+            ('A', 'A', 'B', 'B'),
+        )
+
+    def test_matches_generator(self):
+        for iterable in ['mississippi', (1, 2, 2, 3, 3, 3)]:
+            for r in range(len(tuple(iterable))):
+                with self.subTest(iterable=iterable, r=r):
+                    expected = list(mi.limited_combinations(iterable, r))
+                    for index, combination in enumerate(expected):
+                        actual = mi.nth_limited_combination(iterable, r, index)
+                        self.assertEqual(actual, combination)
+
+    def test_negative_index(self):
+        iterable = 'AAABB'
+        expected = list(mi.limited_combinations(iterable, 4))
+        for index in range(1, len(expected) + 1):
+            with self.subTest(index=-index):
+                self.assertEqual(
+                    mi.nth_limited_combination(iterable, 4, -index),
+                    expected[-index],
+                )
+
+    def test_large(self):
+        # The combination is computed directly, without generating the
+        # preceding ones
+        actual = mi.nth_limited_combination(range(90), 4, 2000000)
+        self.assertEqual(
+            actual, list(mi.limited_combinations(range(90), 4))[2000000]
+        )
+
+    def test_zero_stock(self):
+        self.assertEqual(mi.nth_limited_combination([], 0, 0), ())
+        self.assertEqual(mi.nth_limited_combination({'A': 0}, 0, 0), ())
+        self.assertEqual(
+            mi.nth_limited_combination({'A': 3, 'B': 0}, 2, 0), ('A', 'A')
+        )
+
+    def test_invalid_index(self):
+        with self.assertRaises(IndexError):
+            mi.nth_limited_combination('AAABB', 4, 2)
+        with self.assertRaises(IndexError):
+            mi.nth_limited_combination('AAABB', 4, -3)
+
+    def test_impossible_quota(self):
+        with self.assertRaises(IndexError):
+            mi.nth_limited_combination('AAB', 4, 0)
+
+    def test_negative(self):
+        with self.assertRaises(ValueError):
+            mi.nth_limited_combination([], -1, 0)
+        with self.assertRaises(ValueError):
+            mi.nth_limited_combination({'A': -1}, 1, 0)
 
 
 class FilterExceptTests(TestCase):

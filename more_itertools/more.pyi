@@ -87,6 +87,8 @@ __all__ = [
     'iterate',
     'join_mappings',
     'last',
+    'limited_combinations',
+    'limited_combinations_count',
     'locate',
     'longest_common_prefix',
     'lstrip',
@@ -97,6 +99,7 @@ __all__ = [
     'mark_ends',
     'minmax',
     'nth_combination_with_replacement',
+    'nth_limited_combination',
     'nth_or_last',
     'nth_permutation',
     'nth_prime',
@@ -731,6 +734,15 @@ def ichunked(iterable: Iterable[_T], n: int) -> Iterator[Iterator[_T]]: ...
 def distinct_combinations(
     iterable: Iterable[_T], r: int
 ) -> Iterator[tuple[_T, ...]]: ...
+def limited_combinations(
+    iterable: Iterable[_T] | Mapping[_T, int], r: int
+) -> Iterator[tuple[_T, ...]]: ...
+def limited_combinations_count(
+    iterable: Iterable[_T] | Mapping[_T, int], r: int
+) -> int: ...
+def nth_limited_combination(
+    iterable: Iterable[_T] | Mapping[_T, int], r: int, index: int
+) -> tuple[_T, ...]: ...
 def filter_except(
     validator: Callable[[Any], object],
     iterable: Iterable[_T],

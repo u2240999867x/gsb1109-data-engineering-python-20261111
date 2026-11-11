@@ -4,7 +4,7 @@ import math
 import types
 
 from collections import Counter, defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from functools import cached_property, partial, wraps
 from heapq import heapify, heapreplace
@@ -114,6 +114,8 @@ __all__ = [
     'iterate',
     'join_mappings',
     'last',
+    'limited_combinations',
+    'limited_combinations_count',
     'locate',
     'longest_common_prefix',
     'lstrip',
@@ -124,6 +126,7 @@ __all__ = [
     'mark_ends',
     'minmax',
     'nth_combination_with_replacement',
+    'nth_limited_combination',
     'nth_or_last',
     'nth_permutation',
     'nth_prime',
@@ -3812,6 +3815,116 @@ def distinct_combinations(iterable, r):
             level += 1
 
 
+def _limited_combinations_data(iterable):
+    """Return ``(values, multiplicities)`` for *iterable*.
+
+    *iterable* may be a mapping of items to their available quantities or
+    a plain iterable in which an item's number of occurrences is its
+    available quantity. Distinct values are ordered by first appearance.
+    """
+    if isinstance(iterable, Mapping):
+        values = []
+        multiplicities = []
+        for value, quantity in iterable.items():
+            if quantity < 0:
+                raise ValueError('quantities must be non-negative')
+            values.append(value)
+            multiplicities.append(quantity)
+        return values, multiplicities
+
+    pool = tuple(iterable)
+    try:
+        counts = Counter(pool)
+    except TypeError:
+        # Fall back to linear scans for unhashable items
+        values = []
+        multiplicities = []
+        for item in pool:
+            for i, value in enumerate(values):
+                if item == value:
+                    multiplicities[i] += 1
+                    break
+            else:
+                values.append(item)
+                multiplicities.append(1)
+        return values, multiplicities
+
+    return list(counts), list(counts.values())
+
+
+def _limited_combinations_rows(multiplicities, r):
+    """Return a dynamic programming table in which entry ``[i][s]`` is the
+    number of ways to choose *s* items from ``multiplicities[i:]``.
+    """
+    row = [1] + [0] * r
+    rows = [row]
+    for m in reversed(multiplicities):
+        window = 0
+        new_row = []
+        for s in range(r + 1):
+            window += row[s]
+            if s > m:
+                window -= row[s - m - 1]
+            new_row.append(window)
+        rows.append(new_row)
+        row = new_row
+    rows.reverse()
+    return rows
+
+
+def _limited_combinations_gen(values, multiplicities, r, i, current):
+    if r == 0:
+        yield tuple(current)
+        return
+    if i >= len(values):
+        return
+    value = values[i]
+    for c in range(min(multiplicities[i], r), -1, -1):
+        current.extend(repeat(value, c))
+        yield from _limited_combinations_gen(
+            values, multiplicities, r - c, i + 1, current
+        )
+        del current[len(current) - c :]
+
+
+def limited_combinations(iterable, r):
+    """Yield the distinct combinations of *r* items taken from *iterable*,
+    where each distinct item may be used at most as many times as it is
+    available.
+
+    *iterable* may be a multiset - a plain iterable in which an item's
+    number of occurrences is its available quantity:
+
+        >>> list(limited_combinations(['A', 'A', 'A', 'B', 'B'], 4))
+        [('A', 'A', 'A', 'B'), ('A', 'A', 'B', 'B')]
+
+    It may also be a mapping of items to their available quantities:
+
+        >>> list(limited_combinations({'A': 3, 'B': 2}, 4))
+        [('A', 'A', 'A', 'B'), ('A', 'A', 'B', 'B')]
+
+    Items that compare equal are treated as identical copies, so the
+    permutations of identical items are not distinct combinations.
+    Items with an available quantity of zero never appear in the output.
+
+    Combinations are emitted in lexicographic order according to the
+    order in which distinct items first appear in the input. Permuting
+    the input may permute the order of the output, but not the set of
+    combinations.
+
+    ``ValueError`` is raised if *r* is negative or if a mapping supplies
+    a negative quantity. If *r* exceeds the total number of available
+    items, no combinations are produced.
+    """
+    if r < 0:
+        raise ValueError('r must be non-negative')
+    values, multiplicities = _limited_combinations_data(iterable)
+    if r == 0:
+        yield ()
+        return
+    yield from _limited_combinations_gen(values, multiplicities, r, 0, [])
+
+
 def filter_except(validator, iterable, *exceptions):
     """Yield the items from *iterable* for which the *validator* function does
     not raise one of the specified *exceptions*.
@@ -4417,6 +4530,86 @@ def nth_combination_with_replacement(iterable, r, index):
             i += 1
             index -= num_combs
         result.append(pool[i])
+
+    return tuple(result)
+
+
+def limited_combinations_count(iterable, r):
+    """Return the number of distinct combinations of *r* items taken from
+    *iterable*, where each distinct item may be used at most as many times
+    as it is available.
+
+    *iterable* is interpreted as in :func:`limited_combinations` - either
+    a multiset or a mapping of items to their available quantities:
+
+        >>> limited_combinations_count(['A', 'A', 'A', 'B', 'B'], 4)
+        2
+        >>> limited_combinations_count({'A': 3, 'B': 2}, 4)
+        2
+
+    The count is computed directly, without generating the combinations:
+
+        >>> limited_combinations_count(range(90), 4) == comb(90, 4)
+        True
+
+    Items with an available quantity of zero do not affect the count.
+    If *r* exceeds the total number of available items, the count is
+    zero. ``ValueError`` is raised if *r* is negative or if a mapping
+    supplies a negative quantity.
+    """
+    if r < 0:
+        raise ValueError('r must be non-negative')
+    values, multiplicities = _limited_combinations_data(iterable)
+    return _limited_combinations_rows(multiplicities, r)[0][r]
+
+
+def nth_limited_combination(iterable, r, index):
+    """Equivalent to ``list(limited_combinations(iterable, r))[index]``.
+
+    The distinct combinations of *r* items taken from *iterable* - where
+    each distinct item may be used at most as many times as it is
+    available - can be ordered lexicographically according to the order
+    in which distinct items first appear in the input.
+    :func:`nth_limited_combination` computes the combination at position
+    *index* directly, without computing the previous combinations.
+
+        >>> nth_limited_combination(['A', 'A', 'A', 'B', 'B'], 4, 1)
+        ('A', 'A', 'B', 'B')
+        >>> nth_limited_combination({'A': 3, 'B': 2}, 4, 0)
+        ('A', 'A', 'A', 'B')
+
+    Negative indexes count from the end of the sequence::
+
+        >>> nth_limited_combination({'A': 3, 'B': 2}, 4, -1)
+        ('A', 'A', 'B', 'B')
+
+    ``ValueError`` is raised if *r* is negative or if a mapping supplies
+    a negative quantity. ``IndexError`` is raised if the given *index*
+    is invalid, which includes the case where *r* exceeds the total
+    number of available items.
+    """
+    if r < 0:
+        raise ValueError('r must be non-negative')
+    values, multiplicities = _limited_combinations_data(iterable)
+    rows = _limited_combinations_rows(multiplicities, r)
+
+    c = rows[0][r]
+    if index < 0:
+        index += c
+    if not 0 <= index < c:
+        raise IndexError
+
+    result = []
+    remaining = r
+    for i, value in enumerate(values):
+        row = rows[i + 1]
+        for c in range(min(multiplicities[i], remaining), -1, -1):
+            num_combs = row[remaining - c]
+            if index < num_combs:
+                result.extend(repeat(value, c))
+                remaining -= c
+                break
+            index -= num_combs
 
     return tuple(result)
 

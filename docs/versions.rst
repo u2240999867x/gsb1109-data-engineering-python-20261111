@@ -8,6 +8,11 @@ Version History
 Unreleased
 ----------
 
+* New functions:
+    * :func:`limited_combinations` yields the distinct combinations of *r* items taken from a multiset or a mapping of items to available quantities.
+    * :func:`limited_combinations_count` computes the number of such combinations without generating them.
+    * :func:`nth_limited_combination` computes the combination at a given index directly, without computing the previous combinations.
+
 * Updated functions:
     * :func:`peekable` was updated to avoid caching the entire iterable when sliced with a negative step and omitted *stop*.
 
