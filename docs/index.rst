@@ -116,6 +116,7 @@ Section listing
    formatutils
    funcutils
    gcutils
+   interutils
    ioutils
    iterutils
    jsonutils

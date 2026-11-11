@@ -9,6 +9,7 @@ scheme (`YY.MINOR.MICRO`).
 
 _(unreleased)_
 
+- Added [`interutils.Interval`][interutils.Interval] and [`interutils.IntervalMap`][interutils.IntervalMap], providing one union/intersection/difference/membership interface over intervals with explicit open/closed endpoints, discrete (`step`-based, e.g. dates) vs continuous domains, explainable empty results, and a `from_bounded` constructor that refuses to turn unknown bounds into infinite ranges
 - Added `key` and `reverse` support to [`listutils.BarrelList.sort`][listutils.BarrelList.sort] ([#550](https://github.com/mahmoud/boltons/pull/550))
 - Added `start` and `stop` support to [`listutils.BarrelList.index`][listutils.BarrelList.index] ([#592](https://github.com/mahmoud/boltons/pull/592))
 - Added timezone suffix support (`Z`, `+HH:MM`, `-HHMM`, optional seconds) to [`timeutils.isoparse`][timeutils.isoparse], returning aware datetimes so aware `isoformat()` output round-trips ([#594](https://github.com/mahmoud/boltons/pull/594))
