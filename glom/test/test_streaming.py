@@ -4,6 +4,7 @@ from itertools import count, dropwhile, chain
 
 from glom import Iter
 from glom import glom, SKIP, STOP, T, Call, Spec, Glommer, Check, SKIP
+from glom import IterRetry, RetryError
 
 
 RANGE_5 = list(range(5))
@@ -207,3 +208,246 @@ def test_all():
     assert out == list(range(10))
     assert next(int_iter, None) is None
     assert repr(Iter().all()) == 'Pipe(Iter(), list)'
+
+
+def _make_flaky(fail_times):
+    # call N times per value before succeeding, tracking every invocation
+    calls = []
+
+    def flaky(value):
+        seen = sum(1 for v in calls if v == value)
+        calls.append(value)
+        if seen < fail_times:
+            raise ValueError('transient failure for %r' % (value,))
+        return value * 10
+
+    flaky.calls = calls
+    return flaky
+
+
+def test_retry_succeeds_without_reprocessing_prior_elements():
+    flaky = _make_flaky(fail_times=2)
+    out = glom([1, 2], Iter().map(flaky).retry(3).all())
+    assert out == [10, 20]
+    # each element attempted up to 3 times, but element 1 is never redone
+    # once it has succeeded and element 2 is being processed.
+    assert flaky.calls == [1, 1, 1, 2, 2, 2]
+
+
+def test_retry_is_opt_in():
+    flaky = _make_flaky(fail_times=5)
+    with pytest.raises(ValueError):
+        glom([1, 2], Iter().map(flaky).all())
+    # without retry() the first failure aborts and nothing is retried
+    assert flaky.calls == [1]
+
+
+def test_retry_exhausted_raises_retry_error():
+    def always_fails(value):
+        raise RuntimeError('service unavailable')
+
+    with pytest.raises(RetryError) as exc_info:
+        glom(['a', 'b', 'c'], Iter().map(always_fails).retry(2).all())
+
+    err = exc_info.value
+    assert err.target == 'a'               # original input retained
+    assert err.attempts == 2               # total attempts recorded
+    assert isinstance(err.exc, RuntimeError)  # final reason retained
+    assert err.path.values()[-1] == 0      # input position retained
+    assert '2 attempt' in str(err)
+
+
+def test_retry_non_retryable_exception_propagates_immediately():
+    seen = []
+
+    def raise_keyerror(value):
+        seen.append(value)
+        raise KeyError('not configured for retry')
+
+    with pytest.raises(KeyError):
+        glom([1, 2], Iter().map(raise_keyerror)
+             .retry(3, exceptions=ValueError).all())
+    assert seen == [1]  # no retries, next element never reached
+
+
+def test_retry_accepts_exception_tuple():
+    def raise_keyerror(value):
+        raise KeyError()
+
+    with pytest.raises(RetryError) as exc_info:
+        glom([1], Iter().map(raise_keyerror)
+             .retry(2, exceptions=(ValueError, KeyError)).all())
+    assert exc_info.value.attempts == 2
+
+
+def test_retry_attempts_one_runs_once():
+    invocations = []
+
+    def fail(value):
+        invocations.append(value)
+        raise ValueError()
+
+    with pytest.raises(RetryError) as exc_info:
+        glom([1, 2], Iter().map(fail).retry(1).all())
+    assert invocations == [1]
+    assert exc_info.value.attempts == 1
+
+
+def test_retry_does_not_recreate_input_iterator():
+    iterated = []
+
+    class SinglePassIterator:
+        def __init__(self, data):
+            self._it = iter(data)
+
+        def __iter__(self):
+            iterated.append(id(self))
+            return self
+
+        def __next__(self):
+            return next(self._it)
+
+    source = SinglePassIterator([1, 2, 3])
+    flaky = _make_flaky(fail_times=1)
+    out = glom(source, Iter().map(flaky).retry(3).all())
+
+    assert out == [10, 20, 30]
+    # the very same iterator object is driven throughout; never rebuilt
+    assert set(iterated) == {id(source)}
+
+
+def test_retry_only_reruns_failed_transform():
+    order = []
+
+    def stage(value):
+        order.append(('stage', value))
+        return value
+
+    def fail_on_two(value):
+        order.append(('fail', value))
+        if value == 2:
+            raise ValueError('boom')
+        return value
+
+    with pytest.raises(RetryError) as exc_info:
+        glom([1, 2, 3], Iter().map(stage).map(fail_on_two).retry(2).all())
+
+    assert exc_info.value.target == 2
+    # stage(2) ran once; only fail_on_two(2) was retried, and element 1
+    # (fully successful) was never touched again.
+    assert order == [('stage', 1), ('fail', 1),
+                     ('stage', 2), ('fail', 2), ('fail', 2)]
+
+
+def test_retry_delay_numeric_and_callable():
+    import time
+
+    callable_delays = []
+    config = IterRetry(3, delay=lambda n: callable_delays.append(n) or 0)
+    flaky = _make_flaky(fail_times=2)
+    glom([1], Iter().map(flaky).retry(config).all())
+    assert callable_delays == [0, 1]
+
+    flaky = _make_flaky(fail_times=1)
+    start = time.time()
+    glom([1], Iter().map(flaky).retry(2, delay=0.02).all())
+    assert time.time() - start >= 0.02
+
+
+def test_retry_on_base_subspec():
+    flaky = _make_flaky(fail_times=1)
+    out = glom([5], Iter(flaky).retry(2).all())
+    assert out == [50]
+
+
+def test_retry_works_for_each_per_element_op():
+    def flaky(base):
+        state = {'n': 0}
+
+        def predicate(value):
+            state['n'] += 1
+            if state['n'] == 1:
+                raise RuntimeError('transient')
+            return base(value)
+
+        return predicate
+
+    assert glom(range(5),
+                Iter().filter(flaky(lambda x: x % 2)).retry(3).all()) == [1, 3]
+    assert glom(range(6),
+                Iter().unique(flaky(lambda x: x % 3)).retry(3).all()) == [0, 1, 2]
+    assert glom([1, 2, 3],
+                Iter().takewhile(flaky(lambda x: x < 3)).retry(3).all()) == [1, 2]
+    assert glom([0, 1, 2],
+                Iter().dropwhile(flaky(lambda x: x < 1)).retry(3).all()) == [1, 2]
+
+
+def test_retry_lazy_stream_lets_caller_choose_stop_or_continue():
+    def lookup(value):
+        if value == 2:
+            raise ValueError('reference service down')
+        return value * 10
+
+    stream = glom([1, 2, 3, 4], Iter().map(lookup).retry(2))
+    results, dead_lettered = [], []
+
+    while True:
+        try:
+            results.append(next(stream))
+        except StopIteration:
+            break
+        except RetryError as err:
+            # caller chooses to keep going on the SAME stream; the
+            # underlying iterator is not recreated or rewound
+            dead_lettered.append((err.target, err.path.values()[-1], err.exc))
+
+    assert results == [10, 30, 40]
+    assert len(dead_lettered) == 1
+    assert dead_lettered[0][0] == 2
+    assert dead_lettered[0][1] == 1
+
+
+def test_retry_nested_iter_isolation():
+    def inner_fail(value):
+        raise RuntimeError('inner')
+
+    spec = (Iter()
+            .map(lambda row: glom(row, Iter().map(inner_fail).retry(1).all())),
+            list)
+    with pytest.raises(RetryError) as exc_info:
+        glom([[1, 2]], spec)
+    assert exc_info.value.target == 1
+
+    # a subsequent plain Iter does not inherit the retry configuration
+    seen = []
+
+    def no_retry(value):
+        seen.append(value)
+        raise ValueError()
+
+    with pytest.raises(ValueError):
+        glom([9], Iter().map(no_retry).all())
+    assert seen == [9]
+
+
+def test_retry_shared_config_object():
+    config = IterRetry(3, exceptions=(ValueError,))
+    flaky = _make_flaky(fail_times=2)
+    out = glom([1], Iter().map(flaky).retry(config).all())
+    assert out == [10]
+    assert repr(Iter().retry(config)) == 'Iter().retry(3, exceptions=(ValueError,))'
+
+
+def test_retry_config_validation_and_repr():
+    for bad in (0, -1, 1.5, True, '3'):
+        with pytest.raises(ValueError):
+            IterRetry(bad)
+
+    with pytest.raises(TypeError):
+        Iter().retry('not-a-config')
+
+    assert repr(IterRetry(3)) == 'IterRetry(3)'
+    assert repr(Iter().map(int).retry(3)) == 'Iter().retry(3).map(int)'
+    assert repr(Iter(int).retry(2, exceptions=ValueError, delay=0.1)) == (
+        "Iter(int).retry(2, delay=0.1, exceptions=ValueError)")
+

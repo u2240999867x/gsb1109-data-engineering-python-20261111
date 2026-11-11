@@ -12,6 +12,18 @@ The glom team's approach to updates can be summed up as:
 Check this page when upgrading, we strive to keep the updates
 summarized and well-linked.
 
+## Unreleased
+
+- Add `Iter.retry()` for opt-in, per-element retries in streaming
+  pipelines. The input iterator is never recreated or rewound, so only
+  the in-flight element is retried and already-completed transforms are
+  not re-run. Attempt count, retryable exception types, and an optional
+  delay are configurable via keyword args or a shared `IterRetry`
+  object. Exhausted retries raise `RetryError`, which preserves the
+  input position (`path`), the original `target`, the final `exc`, and
+  the number of `attempts`; stop or continue by catching it on the lazy
+  stream or letting it propagate.
+
 ## 25.12.0
 
 _(December 28, 2025)_

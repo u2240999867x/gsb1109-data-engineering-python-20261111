@@ -20,5 +20,11 @@ Streaming & Iteration
    .. automethod:: slice
    .. automethod:: takewhile
    .. automethod:: dropwhile
+   .. automethod:: retry
    .. automethod:: all
    .. automethod:: first
+
+.. autoclass:: glom.IterRetry
+
+.. autoexception:: glom.RetryError
+   :members:

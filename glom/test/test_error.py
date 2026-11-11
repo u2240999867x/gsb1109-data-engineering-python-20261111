@@ -503,6 +503,9 @@ def test_all_public_errors():
 
     _test_exc(TypeMatchError, 1, Match(str))
 
+    _test_exc(glom.RetryError, [{}],
+              glom.Iter().map(T['nope']).retry(1).all())
+
     for (target, spec, exc) in results:
         assert copy.copy(exc) is not exc
         exc_str = str(exc)

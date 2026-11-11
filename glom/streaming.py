@@ -9,6 +9,7 @@ glom's streaming functionality revolves around a single :class:`Iter`
 Specifier type, which has methods to transform the target stream.
 """
 
+import time
 from itertools import islice, dropwhile, takewhile, chain
 from functools import partial
 try:
@@ -20,9 +21,126 @@ except ImportError:
 
 from boltons.iterutils import split_iter, chunked_iter, windowed_iter, unique_iter, first
 from boltons.funcutils import FunctionBuilder
+from boltons.typeutils import make_sentinel
 
-from .core import glom, T, STOP, SKIP, _MISSING, Path, TargetRegistry, Call, Spec, Pipe, S, bbrepr, format_invocation
+from .core import (glom, T, STOP, SKIP, _MISSING, Path, GlomError,
+                   TargetRegistry, Call, Spec, Pipe, S, bbrepr, format_invocation)
 from .matching import Check
+
+# Scope key carrying the active IterRetry config for an Iter pipeline.
+_ITER_RETRY = make_sentinel('_ITER_RETRY')
+
+_T_TYPE = type(T)
+
+
+def _element_path(element_path):
+    # scope[Path] is either a TType once glom has nested a spec, or a
+    # plain list of index parts at the top level; normalize both to a
+    # Path. TType is not iterable in the __getitem__ sense, so it must
+    # be passed whole rather than unpacked.
+    if isinstance(element_path, _T_TYPE):
+        return Path(element_path)
+    return Path(*element_path)
+
+
+class RetryError(GlomError):
+    """Raised when an :meth:`Iter.retry()`-wrapped stream element exhausts
+    its configured attempts without succeeding.
+
+    The error retains everything needed to pick the stream back up
+    later:
+
+    Args:
+       path (Path): The position of the failed element in the input
+         iterable, relative to the :class:`Iter` target.
+       target: The input element that failed, untouched by the
+         transforms of the chain.
+       exc (Exception): The exception raised by the final attempt.
+       attempts (int): How many total attempts were made, including
+         the initial one.
+
+    >>> # see Iter.retry() for a runnable example
+    """
+    def __init__(self, path, target, exc, attempts):
+        self.path = path
+        self.target = target
+        self.exc = exc
+        self.attempts = attempts
+
+    def get_message(self):
+        return ('retries exhausted after %d attempt(s) at %r, final error: %r'
+                % (self.attempts, self.path, self.exc))
+
+    def __repr__(self):
+        return '%s(%r, %r, %r, %r)' % (self.__class__.__name__,
+                                       self.path, self.target, self.exc, self.attempts)
+
+
+class IterRetry:
+    """Configuration for :meth:`Iter.retry()`.
+
+    Retrying only happens while an :class:`IterRetry` instance is
+    attached to an :class:`Iter`, so a plain :class:`Iter` never
+    retries anything.
+
+    Args:
+       attempts: Total number of attempts per input element, including
+         the initial one. Must be at least ``1``.
+       exceptions: An exception type or tuple of exception types
+         eligible for retry. Any other exception propagates
+         immediately. Defaults to :class:`Exception`.
+       delay: Seconds to wait before the next attempt, or a callable
+         taking the zero-based attempt number (``0`` before the first
+         retry) and returning the wait in seconds. Defaults to no
+         waiting.
+    """
+    __slots__ = ('attempts', 'exceptions', 'delay')
+
+    def __init__(self, attempts, exceptions=Exception, delay=None):
+        if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 1:
+            raise ValueError('attempts must be a positive integer, not %r' % (attempts,))
+        if isinstance(exceptions, (tuple, list)):
+            exceptions = tuple(exceptions)
+        self.attempts = attempts
+        self.exceptions = exceptions
+        self.delay = delay
+
+    def get_delay(self, attempt):
+        delay = self.delay
+        if callable(delay):
+            return delay(attempt)
+        return delay
+
+    def __repr__(self):
+        cn = self.__class__.__name__
+        kwargs = {'exceptions': self.exceptions, 'delay': self.delay}
+        kwargs = {k: v for k, v in kwargs.items() if v not in (Exception, None)}
+        return format_invocation(cn, (self.attempts,), kwargs, repr=bbrepr)
+
+
+def _eval_elem(scope, spec, target):
+    # Apply *spec* to a single stream element *target*, honoring the
+    # active IterRetry config (if any) stashed on the scope.
+    # *target* lives in the surrounding per-element loop's local, so a
+    # retry redoes only this element: the upstream input iterator is
+    # neither advanced here nor recreated.
+    retry = scope.get(_ITER_RETRY)
+    if retry is None:
+        return scope[glom](target, spec, scope)
+
+    element_path = scope[Path]
+    last_exc = None
+    for attempt in range(retry.attempts):
+        if attempt:
+            delay = retry.get_delay(attempt - 1)
+            if delay:
+                time.sleep(delay)
+        try:
+            return scope[glom](target, spec, scope)
+        except retry.exceptions as exc:
+            last_exc = exc
+    raise RetryError(_element_path(element_path), target, last_exc, retry.attempts)
+
 
 class Iter:
     """``Iter()`` is glom's counterpart to Python's built-in :func:`iter()`
@@ -58,6 +176,7 @@ class Iter:
     def __init__(self, subspec=T, **kwargs):
         self.subspec = subspec
         self._iter_stack = kwargs.pop('_iter_stack', [])
+        self._retry = kwargs.pop('_retry', None)
 
         self.sentinel = kwargs.pop('sentinel', STOP)
         if kwargs:
@@ -70,6 +189,14 @@ class Iter:
             base_args = (self.subspec,)
         base = format_invocation(self.__class__.__name__, base_args, repr=bbrepr)
         chunks = [base]
+        if self._retry is not None:
+            retry_kwargs = {}
+            if self._retry.exceptions is not Exception:
+                retry_kwargs['exceptions'] = self._retry.exceptions
+            if self._retry.delay is not None:
+                retry_kwargs['delay'] = self._retry.delay
+            chunks.append('.' + format_invocation(
+                'retry', (self._retry.attempts,), retry_kwargs, repr=bbrepr))
         for fname, args, _ in reversed(self._iter_stack):
             meth = getattr(self, fname)
             fb = FunctionBuilder.from_func(meth)
@@ -83,6 +210,15 @@ class Iter:
         return ''.join(chunks)
 
     def glomit(self, target, scope):
+        if self._retry is not None:
+            # Fork the head map into a dedicated child scope so the
+            # retry config cannot leak past this Iter's (possibly
+            # lazily consumed) pipeline, and nested Iter chains stay
+            # isolated. The head entries (MODE, MIN_MODE,
+            # CHILD_ERRORS, Path, ...) are copied because the glom
+            # core reads several of them straight off the first map.
+            scope = scope.new_child(dict(scope.maps[0]))
+            scope[_ITER_RETRY] = self._retry
         iterator = self._iterate(target, scope)
 
         for _, _, callback in reversed(self._iter_stack):
@@ -101,7 +237,10 @@ class Iter:
         base_path = scope[Path]
         for i, t in enumerate(iterator):
             scope[Path] = base_path + [i]
-            yld = (t if self.subspec is T else scope[glom](t, self.subspec, scope))
+            if self.subspec is T:
+                yld = t
+            else:
+                yld = _eval_elem(scope, self.subspec, t)
             if yld is SKIP:
                 continue
             elif yld is self.sentinel or yld is STOP:
@@ -113,7 +252,9 @@ class Iter:
         return
 
     def _add_op(self, opname, args, callback):
-        return type(self)(subspec=self.subspec, _iter_stack=[(opname, args, callback)] + self._iter_stack)
+        return type(self)(subspec=self.subspec,
+                          _iter_stack=[(opname, args, callback)] + self._iter_stack,
+                          _retry=self._retry)
 
     def map(self, subspec):
         """Return a new :class:`Iter()` spec which will apply the provided
@@ -135,7 +276,7 @@ class Iter:
             'map',
             (subspec,),
             lambda iterable, scope: imap(
-                lambda t: scope[glom](t, subspec, scope), iterable))
+                lambda t: _eval_elem(scope, subspec, t), iterable))
 
     def filter(self, key=T):
         """Return a new :class:`Iter()` spec which will include only elements matching the
@@ -162,7 +303,7 @@ class Iter:
             'filter',
             (key,),
             lambda iterable, scope: ifilter(
-                lambda t: scope[glom](t, check_spec, scope) is not SKIP, iterable))
+                lambda t: _eval_elem(scope, check_spec, t) is not SKIP, iterable))
 
     def chunked(self, size, fill=_MISSING):
         """Return a new :class:`Iter()` spec which groups elements in the iterable
@@ -255,7 +396,7 @@ class Iter:
         return self._add_op(
             'unique',
             (key,),
-            lambda it, scope: unique_iter(it, key=lambda t: scope[glom](t, key, scope)))
+            lambda it, scope: unique_iter(it, key=lambda t: _eval_elem(scope, key, t)))
 
 
     def slice(self, *args):
@@ -297,7 +438,7 @@ class Iter:
             'takewhile',
             (key,),
             lambda it, scope: takewhile(
-                lambda t: scope[glom](t, key, scope), it))
+                lambda t: _eval_elem(scope, key, t), it))
 
     def dropwhile(self, key=T):
         """Returns a new :class:`Iter()` spec which drops stream items until
@@ -318,7 +459,61 @@ class Iter:
             'dropwhile',
             (key,),
             lambda it, scope: dropwhile(
-                lambda t: scope[glom](t, key, scope), it))
+                lambda t: _eval_elem(scope, key, t), it))
+
+    def retry(self, attempts, exceptions=Exception, delay=None):
+        """Return a new :class:`Iter()` spec which retries only the current
+        input element when one of its transforms raises a retryable
+        exception.
+
+        Retrying is opt-in: a plain :class:`Iter` never retries. The
+        underlying input iterable is neither recreated nor rewound —
+        elements already processed are never processed again, and a
+        retry re-runs the whole chain of transforms for the single
+        in-flight element, which stays held in a local the whole time.
+
+        Args:
+           attempts: Total number of attempts per element, including
+             the initial attempt, so ``attempts=3`` means at most two
+             retries. An :class:`IterRetry` instance may be passed
+             instead to share a full configuration between streams.
+           exceptions: An exception type or tuple of types which
+             should trigger a retry. Any other exception propagates
+             immediately. Defaults to :class:`Exception`.
+           delay: Seconds to wait between attempts, or a callable
+             taking the zero-based retry number (``0`` before the first
+             retry) and returning the wait in seconds.
+
+        Once *attempts* are exhausted a :class:`RetryError` is raised,
+        preserving the failed element's input position, its original
+        input value, and the final exception. Stopping or continuing
+        afterwards is the caller's choice::
+
+            try:
+                results = glom(rows, Iter().map(lookup).retry(3).all())
+            except RetryError as e:
+                bad_row, position, why = e.target, e.path, e.exc
+
+        >>> calls = []
+        >>> def flaky(value):
+        ...     calls.append(value)
+        ...     if len([c for c in calls if c == value]) < 3:
+        ...         raise ValueError('transient')
+        ...     return value * 10
+        >>> glom([1, 2], Iter().map(flaky).retry(3).all())
+        [10, 20]
+        """
+        if isinstance(attempts, IterRetry):
+            config = attempts
+        elif isinstance(attempts, int) and not isinstance(attempts, bool):
+            # IterRetry validates that the count is at least 1
+            config = IterRetry(attempts, exceptions=exceptions, delay=delay)
+        else:
+            raise TypeError(
+                'attempts must be a positive integer or IterRetry instance, not %r'
+                % (attempts,))
+        return type(self)(subspec=self.subspec, _iter_stack=list(self._iter_stack),
+                          _retry=config)
 
     # Terminal methods follow
 
