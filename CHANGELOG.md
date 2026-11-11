@@ -9,6 +9,8 @@ scheme (`YY.MINOR.MICRO`).
 
 _(unreleased)_
 
+- Added [`dictutils.flatten`][dictutils.flatten] and [`dictutils.unflatten`][dictutils.unflatten], a reversible pair for handing nested dict/list structures to flat-key stores; paths are tuples of tagged segments, so keys with dots/slashes/empty strings round-trip, integer keys stay distinct from list indices, empty collections are preserved, and conflicting paths raise `ValueError`
+
 - Added `key` and `reverse` support to [`listutils.BarrelList.sort`][listutils.BarrelList.sort] ([#550](https://github.com/mahmoud/boltons/pull/550))
 - Added `start` and `stop` support to [`listutils.BarrelList.index`][listutils.BarrelList.index] ([#592](https://github.com/mahmoud/boltons/pull/592))
 - Added timezone suffix support (`Z`, `+HH:MM`, `-HHMM`, optional seconds) to [`timeutils.isoparse`][timeutils.isoparse], returning aware datetimes so aware `isoformat()` output round-trips ([#594](https://github.com/mahmoud/boltons/pull/594))
@@ -1244,6 +1246,8 @@ added in this release.
 [dictutils.ManyToMany]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.ManyToMany
 [dictutils.FrozenDict]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.FrozenDict
 [dictutils.subdict]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.subdict
+[dictutils.flatten]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.flatten
+[dictutils.unflatten]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.unflatten
 [ecoutils]: http://boltons.readthedocs.org/en/latest/ecoutils.html
 [excutils.ParsedException]: http://boltons.readthedocs.org/en/latest/excutils.html#boltons.excutils.ParsedException
 [fileutils]: http://boltons.readthedocs.org/en/latest/fileutils.html

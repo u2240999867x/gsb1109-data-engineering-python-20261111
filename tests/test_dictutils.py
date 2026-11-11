@@ -678,3 +678,80 @@ def test_frozendict_api():
 
     import copy
     assert copy.copy(fd) is fd
+
+
+class TestFlattenUnflatten:
+    def test_flatten_basic(self):
+        from boltons.dictutils import flatten
+        src = {'a': {'b': 1}, 'l': [2, 3]}
+        assert flatten(src) == {(('k', 'a'), ('k', 'b')): 1,
+                                (('k', 'l'), ('i', 0)): 2,
+                                (('k', 'l'), ('i', 1)): 3}
+
+    def test_roundtrip(self):
+        from boltons.dictutils import flatten, unflatten
+        src = {'a': {'b': [1, 2, {'c': 'd'}]},
+               'list': [None, True, 3.5, 'x'],
+               0: 'int key',
+               'nested': {'deeper': [{'x': 1}, {'y': 2}]}}
+        assert unflatten(flatten(src)) == src
+
+    def test_special_char_keys_roundtrip(self):
+        from boltons.dictutils import flatten, unflatten
+        src = {'a.b': 1, 'x/y': 2, '': 3, 'a': {'b': 4}, 'x': {'y': 5},
+               'dots.and/slashes': {'': {'': 6}}}
+        assert unflatten(flatten(src)) == src
+
+    def test_int_keys_not_confused_with_list_indices(self):
+        from boltons.dictutils import flatten, unflatten
+        assert unflatten(flatten({0: 'zero', 1: 'one'})) == {0: 'zero', 1: 'one'}
+        assert unflatten(flatten(['zero', 'one'])) == ['zero', 'one']
+        src = {0: [1], 1: {0: 'nested int key'}}
+        assert unflatten(flatten(src)) == src
+
+    def test_empty_collections_roundtrip(self):
+        from boltons.dictutils import flatten, unflatten
+        src = {'empty_dict': {}, 'empty_list': [],
+               'nested': {'also_empty': {}, 'list_of_empties': [{}, []]}}
+        assert unflatten(flatten(src)) == src
+        assert unflatten(flatten({})) == {}
+        assert unflatten(flatten([])) == []
+        assert flatten({}) != {}
+        assert flatten([]) != {}
+
+    def test_unflatten_empty_input(self):
+        from boltons.dictutils import unflatten
+        assert unflatten({}) == {}
+
+    def test_unflatten_conflict_leaf_vs_subtree(self):
+        from boltons.dictutils import unflatten
+        with pytest.raises(ValueError):
+            unflatten({(('k', 'a'),): 1, (('k', 'a'), ('k', 'b')): 2})
+        with pytest.raises(ValueError):
+            unflatten({(('k', 'a'), ('k', 'b')): 2, (('k', 'a'),): 1})
+
+    def test_unflatten_conflict_mixed_kinds(self):
+        from boltons.dictutils import unflatten
+        with pytest.raises(ValueError):
+            unflatten({(('k', 'a'), ('k', 0)): 1, (('k', 'a'), ('i', 0)): 2})
+
+    def test_unflatten_conflict_root(self):
+        from boltons.dictutils import unflatten
+        with pytest.raises(ValueError):
+            unflatten({(): 1, (('k', 'a'),): 2})
+
+    def test_unflatten_noncontiguous_indices(self):
+        from boltons.dictutils import unflatten
+        with pytest.raises(ValueError):
+            unflatten({(('k', 'a'), ('i', 0)): 1, (('k', 'a'), ('i', 2)): 3})
+
+    def test_unflatten_invalid_segments(self):
+        from boltons.dictutils import unflatten
+        with pytest.raises(ValueError):
+            unflatten({(('x', 'a'),): 1})
+        with pytest.raises(ValueError):
+            unflatten({(('i', -1),): 1})
+        with pytest.raises(ValueError):
+            unflatten({(('i', 'a'),): 1})
+        with pytest.raises(ValueError):
+            unflatten({('bare',): 1})

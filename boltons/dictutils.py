@@ -73,14 +73,19 @@ from itertools import zip_longest
 try:
     from .typeutils import make_sentinel
     _MISSING = make_sentinel(var_name='_MISSING')
+    _EMPTY_MAP = make_sentinel(var_name='_EMPTY_MAP')
+    _EMPTY_LIST = make_sentinel(var_name='_EMPTY_LIST')
 except ImportError:
     _MISSING = object()
+    _EMPTY_MAP = object()
+    _EMPTY_LIST = object()
 
 
 PREV, NEXT, KEY, VALUE, SPREV, SNEXT = range(6)
 
 
-__all__ = ['MultiDict', 'OMD', 'OrderedMultiDict', 'OneToOne', 'ManyToMany', 'subdict', 'FrozenDict']
+__all__ = ['MultiDict', 'OMD', 'OrderedMultiDict', 'OneToOne', 'ManyToMany', 'subdict', 'FrozenDict',
+           'flatten', 'unflatten']
 
 
 class OrderedMultiDict(dict):
@@ -1061,6 +1066,169 @@ def subdict(d, keep=None, drop=None):
     keys = set(keep) - set(drop)
 
     return type(d)([(k, v) for k, v in d.items() if k in keys])
+
+
+# Path segment kinds used by flatten()/unflatten(). Tagging every
+# segment keeps integer mapping keys distinct from list indices, and
+# because segments are never joined into a string, keys containing
+# dots, slashes, or even empty strings round-trip losslessly.
+_KEY_SEG = 'k'
+_IDX_SEG = 'i'
+
+
+def flatten(d):
+    """Flatten a nested structure of :class:`dict` and :class:`list`
+    into a single-level dict mapping *path tuples* to leaf values,
+    suitable for stores that only support flat keys.
+
+    Each path is a tuple of tagged segments, one per level of
+    nesting. A segment is a ``(kind, value)`` pair, where *kind* is
+    ``'k'`` for a mapping key and ``'i'`` for a list index:
+
+    >>> flatten({'a': {'b': 1}, 'l': [2, 3]})
+    {(('k', 'a'), ('k', 'b')): 1, (('k', 'l'), ('i', 0)): 2, (('k', 'l'), ('i', 1)): 3}
+
+    Because segments are never joined with a separator, keys
+    containing dots, slashes, or empty strings are preserved exactly,
+    and integer mapping keys are never confused with list indices:
+
+    >>> flatten({'a.b': {'x/y': 1}, 0: ['z']})
+    {(('k', 'a.b'), ('k', 'x/y')): 1, (('k', 0), ('i', 0)): 'z'}
+
+    Only :class:`dict` and :class:`list` (and their subtypes) are
+    treated as containers; every other value, including tuples and
+    strings, is a leaf. Empty dicts and lists have no leaves of their
+    own, so they are recorded with a sentinel value to keep them from
+    disappearing; :func:`unflatten` restores them.
+
+    The output is designed to round-trip: ``unflatten(flatten(d))``
+    returns a structure equal to *d* (with the caveat that only dict
+    and list containers are rebuilt).
+    """
+    flat = {}
+    _flatten_into(d, (), flat)
+    return flat
+
+
+def _flatten_into(value, path, flat):
+    if isinstance(value, dict):
+        if not value:
+            flat[path] = _EMPTY_MAP
+        for key, subvalue in value.items():
+            _flatten_into(subvalue, path + ((_KEY_SEG, key),), flat)
+    elif isinstance(value, list):
+        if not value:
+            flat[path] = _EMPTY_LIST
+        for idx, subvalue in enumerate(value):
+            _flatten_into(subvalue, path + ((_IDX_SEG, idx),), flat)
+    else:
+        flat[path] = value
+
+
+class _FlatLeaf:
+    __slots__ = ('value',)
+
+    def __init__(self, value):
+        self.value = value
+
+
+def _check_segment(seg, path):
+    try:
+        kind, key = seg
+    except (TypeError, ValueError):
+        raise ValueError(f'invalid path segment {seg!r} in path {path!r};'
+                         " expected ('k', key) or ('i', index) pairs")
+    if kind == _KEY_SEG:
+        return key
+    if kind == _IDX_SEG:
+        if not isinstance(key, int) or isinstance(key, bool) or key < 0:
+            raise ValueError(f'invalid list index {key!r} in path {path!r};'
+                             ' expected a non-negative int')
+        return key
+    raise ValueError(f'invalid segment kind {kind!r} in path {path!r};'
+                     f' expected {_KEY_SEG!r} or {_IDX_SEG!r}')
+
+
+def _unwrap_flat_value(value):
+    if value is _EMPTY_MAP:
+        return {}
+    if value is _EMPTY_LIST:
+        return []
+    return value
+
+
+def _build_unflattened(node, path):
+    kinds = {seg[0] for seg in node}
+    if len(kinds) > 1:
+        raise ValueError(f'conflict at path {path!r}: position is claimed as'
+                         ' both a mapping and a list')
+    if kinds == {_IDX_SEG}:
+        pairs = sorted(node.items(), key=lambda item: item[0][1])
+        indices = [seg[1] for seg, _ in pairs]
+        if indices != list(range(len(pairs))):
+            raise ValueError(f'conflict at path {path!r}: non-contiguous list'
+                             f' indices {indices!r}')
+        return [_resolve_flat_child(child, path + (seg,)) for seg, child in pairs]
+    return {seg[1]: _resolve_flat_child(child, path + (seg,))
+            for seg, child in node.items()}
+
+
+def _resolve_flat_child(child, path):
+    if isinstance(child, dict):
+        return _build_unflattened(child, path)
+    return _unwrap_flat_value(child.value)
+
+
+def unflatten(flat):
+    """Rebuild a nested structure of dicts and lists from a flattened
+    mapping produced by :func:`flatten`.
+
+    Takes a dict mapping *path tuples* (see :func:`flatten` for the
+    segment format) to leaf values, and returns the corresponding
+    nested structure:
+
+    >>> unflatten({(('k', 'a'), ('k', 'b')): 1, (('k', 'l'), ('i', 0)): 2})
+    {'a': {'b': 1}, 'l': [2]}
+
+    Empty dicts and lists recorded by :func:`flatten` are restored,
+    so no part of the original structure is lost:
+
+    >>> unflatten(flatten({'empty': {}, 'items': []}))
+    {'empty': {}, 'items': []}
+
+    A :exc:`ValueError` is raised when the input is inconsistent:
+    when one path claims a position is a leaf value while another
+    claims it is a subtree, when mapping keys and list indices are
+    mixed under the same position, or when list indices are not
+    contiguous.
+    """
+    if not flat:
+        return {}
+    tree = {}
+    for path, value in flat.items():
+        path = tuple(path)
+        if not path:
+            if len(flat) > 1:
+                raise ValueError('conflict at path (): position is claimed as'
+                                 ' both a leaf value and a subtree')
+            return _unwrap_flat_value(value)
+        node = tree
+        for depth, seg in enumerate(path):
+            _check_segment(seg, path)
+            if depth == len(path) - 1:
+                if seg in node:
+                    raise ValueError(f'conflict at path {path!r}: position is'
+                                     ' claimed as both a leaf value and a subtree')
+                node[seg] = _FlatLeaf(value)
+            else:
+                child = node.get(seg)
+                if isinstance(child, _FlatLeaf):
+                    raise ValueError(f'conflict at path {path!r}: position is'
+                                     ' claimed as both a leaf value and a subtree')
+                if child is None:
+                    child = node[seg] = {}
+                node = child
+    return _build_unflattened(tree, ())
 
 
 class FrozenHashError(TypeError):
