@@ -73,15 +73,22 @@ class Parser(object):
     _CACHE = {}
     _MAX_SIZE = 512
 
-    def __init__(self, lookahead=2):
+    def __init__(self, lookahead=2, track_positions=False):
         self.tokenizer = None
         self._tokens = [None] * lookahead
         self._buffer_size = lookahead
         self._index = 0
+        #: When enabled, every AST node is annotated with a 'span'
+        #:  key holding the (start, end) character offsets of the
+        #:  node within the original expression.  The interpreter
+        #:  uses these spans to point runtime errors at the exact
+        #:  segment of the expression that failed.
+        self._track_positions = track_positions
 
     def parse(self, expression):
+        cache_key = (expression, self._track_positions)
         try:
-            return self._CACHE[expression]
+            return self._CACHE[cache_key]
         except KeyError:
             pass
         parsed_result = self._do_parse(expression)
@@ -99,7 +106,7 @@ class Parser(object):
                 # an element from the cache, otherwise this can grow
                 # unbounded.
                 return parsed_result
-        self._CACHE[expression] = parsed_result
+        self._CACHE[cache_key] = parsed_result
         return parsed_result
 
     def _do_parse(self, expression):
@@ -145,11 +152,37 @@ class Parser(object):
                 current_token = self._current_token()
         return left
 
+    def _node_span(self, node, start, end=None):
+        # Attach a (start, end) source span to a node when position
+        # tracking is enabled.  By default ``end`` is the end of the
+        # most recently consumed token, which works because nodes are
+        # created right after their final token has been consumed.
+        if self._track_positions:
+            if end is None:
+                end = self._tokens[self._index - 1]['end']
+            node['span'] = (start, end)
+        return node
+
+    def _span_of(self, node):
+        # The start position of a previously parsed node.  The
+        # fallback is never used because _node_span() is a no-op
+        # whenever position tracking is disabled.
+        if self._track_positions:
+            return node['span'][0]
+        return 0
+
+    def _identity_at(self, position):
+        # An identity node standing in for an implicit current node,
+        # given an empty span at the provided position.
+        return self._node_span(ast.identity(), position, position)
+
     def _token_nud_literal(self, token):
-        return ast.literal(token['value'])
+        return self._node_span(ast.literal(token['value']),
+                               token['start'], token['end'])
 
     def _token_nud_unquoted_identifier(self, token):
-        return ast.field(token['value'])
+        return self._node_span(ast.field(token['value']),
+                               token['start'], token['end'])
 
     def _token_nud_quoted_identifier(self, token):
         field = ast.field(token['value'])
@@ -160,18 +193,19 @@ class Parser(object):
             raise exceptions.ParseError(
                 0, t['value'], t['type'],
                 'Quoted identifier not allowed for function names.')
-        return field
+        return self._node_span(field, token['start'], token['end'])
 
     def _token_nud_star(self, token):
-        left = ast.identity()
+        left = self._identity_at(token['start'])
         if self._current_token() == 'rbracket':
-            right = ast.identity()
+            right = self._identity_at(token['end'])
         else:
             right = self._parse_projection_rhs(self.BINDING_POWER['star'])
-        return ast.value_projection(left, right)
+        return self._node_span(ast.value_projection(left, right),
+                               token['start'])
 
     def _token_nud_filter(self, token):
-        return self._token_led_filter(ast.identity())
+        return self._token_led_filter(self._identity_at(token['start']))
 
     def _token_nud_lbrace(self, token):
         return self._parse_multi_select_hash()
@@ -182,14 +216,16 @@ class Parser(object):
         return expression
 
     def _token_nud_flatten(self, token):
-        left = ast.flatten(ast.identity())
+        left = self._node_span(
+            ast.flatten(self._identity_at(token['start'])),
+            token['start'], token['end'])
         right = self._parse_projection_rhs(
             self.BINDING_POWER['flatten'])
-        return ast.projection(left, right)
+        return self._node_span(ast.projection(left, right), token['start'])
 
     def _token_nud_not(self, token):
         expr = self._expression(self.BINDING_POWER['not'])
-        return ast.not_expression(expr)
+        return self._node_span(ast.not_expression(expr), token['start'])
 
     def _token_nud_lbracket(self, token):
         if self._current_token() in ['number', 'colon']:
@@ -198,13 +234,16 @@ class Parser(object):
             # We don't really need an index_expression node, we can
             # just use emit an index node here if we're not dealing
             # with a slice.
-            return self._project_if_slice(ast.identity(), right)
+            return self._project_if_slice(
+                self._identity_at(token['start']), right)
         elif self._current_token() == 'star' and \
                 self._lookahead(1) == 'rbracket':
             self._advance()
             self._advance()
             right = self._parse_projection_rhs(self.BINDING_POWER['star'])
-            return ast.projection(ast.identity(), right)
+            return self._node_span(
+                ast.projection(self._identity_at(token['start']), right),
+                token['start'])
         else:
             return self._parse_multi_select_list()
 
@@ -213,6 +252,7 @@ class Parser(object):
         # [<current>
         #  ^
         #  | current token
+        start = self._tokens[self._index - 1]['start']
         if (self._lookahead(0) == 'colon' or
                 self._lookahead(1) == 'colon'):
             return self._parse_slice_expression()
@@ -221,12 +261,13 @@ class Parser(object):
             node = ast.index(self._lookahead_token(0)['value'])
             self._advance()
             self._match('rbracket')
-            return node
+            return self._node_span(node, start)
 
     def _parse_slice_expression(self):
         # [start:end:step]
         # Where start, end, and step are optional.
         # The last colon is optional as well.
+        start = self._tokens[self._index - 1]['start']
         parts = [None, None, None]
         index = 0
         current_token = self._current_token()
@@ -245,41 +286,46 @@ class Parser(object):
                     self._lookahead_token(0), 'syntax error')
             current_token = self._current_token()
         self._match('rbracket')
-        return ast.slice(*parts)
+        return self._node_span(ast.slice(*parts), start)
 
     def _token_nud_current(self, token):
-        return ast.current_node()
+        return self._node_span(ast.current_node(),
+                               token['start'], token['end'])
 
     def _token_nud_expref(self, token):
         expression = self._expression(self.BINDING_POWER['expref'])
-        return ast.expref(expression)
+        return self._node_span(ast.expref(expression), token['start'])
 
     def _token_led_dot(self, left):
         if not self._current_token() == 'star':
             right = self._parse_dot_rhs(self.BINDING_POWER['dot'])
             if left['type'] == 'subexpression':
                 left['children'].append(right)
-                return left
+                return self._node_span(left, self._span_of(left))
             else:
-                return ast.subexpression([left, right])
+                return self._node_span(ast.subexpression([left, right]),
+                                       self._span_of(left))
         else:
             # We're creating a projection.
             self._advance()
             right = self._parse_projection_rhs(
                 self.BINDING_POWER['dot'])
-            return ast.value_projection(left, right)
+            return self._node_span(ast.value_projection(left, right),
+                                   self._span_of(left))
 
     def _token_led_pipe(self, left):
         right = self._expression(self.BINDING_POWER['pipe'])
-        return ast.pipe(left, right)
+        return self._node_span(ast.pipe(left, right), self._span_of(left))
 
     def _token_led_or(self, left):
         right = self._expression(self.BINDING_POWER['or'])
-        return ast.or_expression(left, right)
+        return self._node_span(ast.or_expression(left, right),
+                               self._span_of(left))
 
     def _token_led_and(self, left):
         right = self._expression(self.BINDING_POWER['and'])
-        return ast.and_expression(left, right)
+        return self._node_span(ast.and_expression(left, right),
+                               self._span_of(left))
 
     def _token_led_lparen(self, left):
         if left['type'] != 'field':
@@ -299,17 +345,18 @@ class Parser(object):
             args.append(expression)
         self._match('rparen')
         function_node = ast.function_expression(name, args)
-        return function_node
+        return self._node_span(function_node, self._span_of(left))
 
     def _token_led_filter(self, left):
         # Filters are projections.
         condition = self._expression(0)
         self._match('rbracket')
         if self._current_token() == 'flatten':
-            right = ast.identity()
+            right = self._identity_at(self._tokens[self._index - 1]['end'])
         else:
             right = self._parse_projection_rhs(self.BINDING_POWER['filter'])
-        return ast.filter_projection(left, right, condition)
+        node = ast.filter_projection(left, right, condition)
+        return self._node_span(node, self._span_of(left))
 
     def _token_led_eq(self, left):
         return self._parse_comparator(left, 'eq')
@@ -330,10 +377,11 @@ class Parser(object):
         return self._parse_comparator(left, 'lte')
 
     def _token_led_flatten(self, left):
-        left = ast.flatten(left)
+        left = self._node_span(ast.flatten(left), self._span_of(left))
         right = self._parse_projection_rhs(
             self.BINDING_POWER['flatten'])
-        return ast.projection(left, right)
+        return self._node_span(ast.projection(left, right),
+                               self._span_of(left))
 
     def _token_led_lbracket(self, left):
         token = self._lookahead_token(0)
@@ -344,7 +392,7 @@ class Parser(object):
                 # we can avoid creating another node and instead just add
                 # the right node as a child of the left.
                 left['children'].append(right)
-                return left
+                return self._node_span(left, self._span_of(left))
             else:
                 return self._project_if_slice(left, right)
         else:
@@ -352,22 +400,28 @@ class Parser(object):
             self._match('star')
             self._match('rbracket')
             right = self._parse_projection_rhs(self.BINDING_POWER['star'])
-            return ast.projection(left, right)
+            return self._node_span(ast.projection(left, right),
+                                   self._span_of(left))
 
     def _project_if_slice(self, left, right):
-        index_expr = ast.index_expression([left, right])
+        index_expr = self._node_span(ast.index_expression([left, right]),
+                                     self._span_of(left))
         if right['type'] == 'slice':
-            return ast.projection(
-                index_expr,
-                self._parse_projection_rhs(self.BINDING_POWER['star']))
+            return self._node_span(
+                ast.projection(
+                    index_expr,
+                    self._parse_projection_rhs(self.BINDING_POWER['star'])),
+                self._span_of(index_expr))
         else:
             return index_expr
 
     def _parse_comparator(self, left, comparator):
         right = self._expression(self.BINDING_POWER[comparator])
-        return ast.comparator(comparator, left, right)
+        node = ast.comparator(comparator, left, right)
+        return self._node_span(node, self._span_of(left))
 
     def _parse_multi_select_list(self):
+        start = self._tokens[self._index - 1]['start']
         expressions = []
         while True:
             expression = self._expression()
@@ -377,9 +431,10 @@ class Parser(object):
             else:
                 self._match('comma')
         self._match('rbracket')
-        return ast.multi_select_list(expressions)
+        return self._node_span(ast.multi_select_list(expressions), start)
 
     def _parse_multi_select_hash(self):
+        start = self._tokens[self._index - 1]['start']
         pairs = []
         while True:
             key_token = self._lookahead_token(0)
@@ -391,19 +446,19 @@ class Parser(object):
             self._match('colon')
             value = self._expression(0)
             node = ast.key_val_pair(key_name=key_name, node=value)
-            pairs.append(node)
+            pairs.append(self._node_span(node, key_token['start']))
             if self._current_token() == 'comma':
                 self._match('comma')
             elif self._current_token() == 'rbrace':
                 self._match('rbrace')
                 break
-        return ast.multi_select_dict(nodes=pairs)
+        return self._node_span(ast.multi_select_dict(nodes=pairs), start)
 
     def _parse_projection_rhs(self, binding_power):
         # Parse the right hand side of the projection.
         if self.BINDING_POWER[self._current_token()] < self._PROJECTION_STOP:
             # BP of 10 are all the tokens that stop a projection.
-            right = ast.identity()
+            right = self._identity_at(self._tokens[self._index - 1]['end'])
         elif self._current_token() == 'lbracket':
             right = self._expression(binding_power)
         elif self._current_token() == 'filter':
@@ -513,7 +568,15 @@ class ParsedResult(object):
 
     def search(self, value, options=None):
         interpreter = visitor.TreeInterpreter(options)
-        result = interpreter.visit(self.parsed, value)
+        try:
+            result = interpreter.visit(self.parsed, value)
+        except exceptions.JMESPathError as e:
+            if e.expression is None:
+                # Give runtime errors access to the original
+                # expression so they can point at the failing
+                # segment when position tracking is enabled.
+                e.expression = self.expression
+            raise
         return result
 
     def _render_dot_file(self):

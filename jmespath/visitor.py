@@ -1,5 +1,6 @@
 import operator
 
+from jmespath import exceptions
 from jmespath import functions
 from jmespath.compat import string_type
 from numbers import Number
@@ -125,6 +126,29 @@ class TreeInterpreter(Visitor):
     def default_visit(self, node, *args, **kwargs):
         raise NotImplementedError(node['type'])
 
+    def visit(self, node, *args, **kwargs):
+        try:
+            return super(TreeInterpreter, self).visit(node, *args, **kwargs)
+        except exceptions.JMESPathError as e:
+            self._add_source_info(e, node)
+            raise
+
+    def _add_source_info(self, error, node):
+        # Annotate runtime errors with the source span of the node
+        # being evaluated when the expression was parsed with
+        # position tracking enabled.  The innermost failing node
+        # wins for error.span, and every node on the way out is
+        # recorded in error.trace.  Nothing is built on the
+        # successful path.
+        span = node.get('span')
+        if span is None:
+            return
+        if error.span is None:
+            error.span = span
+        if error.trace is None:
+            error.trace = []
+        error.trace.append((node['type'], span))
+
     def visit_subexpression(self, node, value):
         result = value
         for node in node['children']:
@@ -168,7 +192,26 @@ class TreeInterpreter(Visitor):
         for child in node['children']:
             current = self.visit(child, value)
             resolved_args.append(current)
-        return self._functions.call_function(node['value'], resolved_args)
+        try:
+            return self._functions.call_function(node['value'], resolved_args)
+        except exceptions.JMESPathTypeError as e:
+            self._add_argument_source_info(e, node)
+            raise
+
+    def _add_argument_source_info(self, error, node):
+        # When a function argument fails the type check, point the
+        # error at the span of that specific argument rather than
+        # the whole function call.
+        if error.span is not None:
+            return
+        arg_index = error.arg_index
+        if arg_index is None:
+            return
+        children = node['children']
+        if 0 <= arg_index < len(children):
+            span = children[arg_index].get('span')
+            if span is not None:
+                error.span = span
 
     def visit_filter_projection(self, node, value):
         base = self.visit(node['children'][0], value)

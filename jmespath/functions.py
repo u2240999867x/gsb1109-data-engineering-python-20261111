@@ -95,9 +95,10 @@ class Functions(metaclass=FunctionRegistry):
             allowed_types = signature[i]['types']
             if allowed_types:
                 self._type_check_single(actual[i], allowed_types,
-                                        function_name)
+                                        function_name, i)
 
-    def _type_check_single(self, current, types, function_name):
+    def _type_check_single(self, current, types, function_name,
+                           arg_index=None):
         # Type checking involves checking the top level type,
         # and in the case of arrays, potentially checking the types
         # of each element.
@@ -110,7 +111,8 @@ class Functions(metaclass=FunctionRegistry):
         if actual_typename not in allowed_types:
             raise exceptions.JMESPathTypeError(
                 function_name, current,
-                self._convert_to_jmespath_type(actual_typename), types)
+                self._convert_to_jmespath_type(actual_typename), types,
+                arg_index=arg_index)
         # If we're dealing with a list type, we can have
         # additional restrictions on the type of the list
         # elements (for example a function can require a
@@ -118,7 +120,7 @@ class Functions(metaclass=FunctionRegistry):
         # Arrays are the only types that can have subtypes.
         if allowed_subtypes:
             self._subtype_check(current, allowed_subtypes,
-                                types, function_name)
+                                types, function_name, arg_index)
 
     def _get_allowed_pytypes(self, types):
         allowed_types = []
@@ -133,7 +135,8 @@ class Functions(metaclass=FunctionRegistry):
             allowed_types.extend(REVERSE_TYPES_MAP[type_])
         return allowed_types, allowed_subtypes
 
-    def _subtype_check(self, current, allowed_subtypes, types, function_name):
+    def _subtype_check(self, current, allowed_subtypes, types, function_name,
+                       arg_index=None):
         if len(allowed_subtypes) == 1:
             # The easy case, we know up front what type
             # we need to validate.
@@ -142,7 +145,8 @@ class Functions(metaclass=FunctionRegistry):
                 actual_typename = type(element).__name__
                 if actual_typename not in allowed_subtypes:
                     raise exceptions.JMESPathTypeError(
-                        function_name, element, actual_typename, types)
+                        function_name, element, actual_typename, types,
+                        arg_index=arg_index)
         elif len(allowed_subtypes) > 1 and current:
             # Dynamic type validation.  Based on the first
             # type we see, we validate that the remaining types
@@ -154,12 +158,14 @@ class Functions(metaclass=FunctionRegistry):
                     break
             else:
                 raise exceptions.JMESPathTypeError(
-                    function_name, current[0], first, types)
+                    function_name, current[0], first, types,
+                    arg_index=arg_index)
             for element in current:
                 actual_typename = type(element).__name__
                 if actual_typename not in allowed:
                     raise exceptions.JMESPathTypeError(
-                        function_name, element, actual_typename, types)
+                        function_name, element, actual_typename, types,
+                        arg_index=arg_index)
 
     @signature({'types': ['number']})
     def _func_abs(self, arg):

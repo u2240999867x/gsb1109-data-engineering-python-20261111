@@ -137,7 +137,7 @@ class TestRegexLexer(unittest.TestCase):
         self.assertEqual(
             tokens,
             [{'type': 'literal', 'value': '{{}',
-              'start': 0, 'end': 4},
+              'start': 0, 'end': 5},
              {'type': 'eof', 'value': '',
               'start': 5, 'end': 5}
              ]

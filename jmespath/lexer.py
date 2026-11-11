@@ -172,17 +172,15 @@ class Lexer(object):
                 raise LexerError(lexer_position=start,
                                  lexer_value=self._expression[start:],
                                  message="Bad token %s" % lexeme)
-        token_len = self._position - start
         return {'type': 'literal', 'value': parsed_json,
-                'start': start, 'end': token_len}
+                'start': start, 'end': self._token_end_position()}
 
     def _consume_quoted_identifier(self):
         start = self._position
         lexeme = '"' + self._consume_until('"') + '"'
         try:
-            token_len = self._position - start
             return {'type': 'quoted_identifier', 'value': loads(lexeme),
-                    'start': start, 'end': token_len}
+                    'start': start, 'end': self._token_end_position()}
         except ValueError as e:
             error_message = str(e).split(':')[0]
             raise LexerError(lexer_position=start,
@@ -192,9 +190,17 @@ class Lexer(object):
     def _consume_raw_string_literal(self):
         start = self._position
         lexeme = self._consume_until("'").replace("\\'", "'")
-        token_len = self._position - start
         return {'type': 'literal', 'value': lexeme,
-                'start': start, 'end': token_len}
+                'start': start, 'end': self._token_end_position()}
+
+    def _token_end_position(self):
+        # The (exclusive) end position of the token just consumed.
+        # When a token runs up to the end of the expression, _next()
+        # does not advance past the final character, so the position
+        # has to be adjusted to remain an exclusive end offset.
+        if self._current is None:
+            return self._position + 1
+        return self._position
 
     def _match_or_else(self, expected, match_type, else_type):
         start = self._position

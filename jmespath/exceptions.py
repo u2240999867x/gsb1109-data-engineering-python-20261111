@@ -1,8 +1,31 @@
 from jmespath.compat import with_str_method
 
 
+def _render_source_span(expression, span):
+    # Render an expression with a caret underline beneath the
+    # character range identified by span, e.g:
+    #
+    # for expression:
+    # "foo[*].length(@)"
+    #       ^
+    start, end = span
+    underline = ' ' * (start + 1) + '^' * max(1, end - start)
+    return 'for expression:\n"%s"\n%s' % (expression, underline)
+
+
 class JMESPathError(ValueError):
-    pass
+    #: Optional compile-time source information attached to runtime
+    #: errors.  These attributes are only populated when the
+    #: expression was parsed with position tracking enabled (see
+    #: jmespath.compile()).  ``expression`` is the original
+    #: expression string, ``span`` is a (start, end) tuple of
+    #: character offsets into ``expression`` for the innermost
+    #: failing segment, and ``trace`` is a list of
+    #: (node_type, span) tuples ordered from the innermost node
+    #: outwards, describing where the error propagated through.
+    expression = None
+    span = None
+    trace = None
 
 
 @with_str_method
@@ -99,17 +122,25 @@ class VariadictArityError(ArityError):
 @with_str_method
 class JMESPathTypeError(JMESPathError):
     def __init__(self, function_name, current_value, actual_type,
-                 expected_types):
+                 expected_types, arg_index=None):
         self.function_name = function_name
         self.current_value = current_value
         self.actual_type = actual_type
         self.expected_types = expected_types
+        #: The 0-based index of the function argument that failed
+        #: the type check, or None when it is not tied to a
+        #: specific argument.
+        self.arg_index = arg_index
 
     def __str__(self):
-        return ('In function %s(), invalid type for value: %s, '
-                'expected one of: %s, received: "%s"' % (
-                    self.function_name, self.current_value,
-                    self.expected_types, self.actual_type))
+        message = ('In function %s(), invalid type for value: %s, '
+                   'expected one of: %s, received: "%s"' % (
+                       self.function_name, self.current_value,
+                       self.expected_types, self.actual_type))
+        if self.expression is not None and self.span is not None:
+            message = '%s\n%s' % (
+                message, _render_source_span(self.expression, self.span))
+        return message
 
 
 class EmptyExpressionError(JMESPathError):

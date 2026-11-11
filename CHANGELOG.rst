@@ -1,7 +1,16 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add optional source spans for runtime errors.  Parsing with
+  ``jmespath.compile(expression, track_positions=True)`` records the
+  character range of every AST node, and runtime errors (such as
+  function argument type mismatches, including failures inside
+  nested projections) then carry ``expression``, ``span`` and
+  ``trace`` attributes that point at the failing segment of the
+  original expression.
+* Fix token end positions for backtick JSON literals, raw string
+  literals, and quoted identifiers so they are absolute,
+  end-exclusive character offsets even at the end of an expression.
 
 
 1.1.0
