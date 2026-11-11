@@ -1,6 +1,6 @@
 from dataclasses import is_dataclass
 from itertools import zip_longest
-from typing import TypeVar, Type, Optional, Mapping, Any, Collection, MutableMapping
+from typing import TypeVar, Type, Optional, Mapping, Any, Collection, MutableMapping, Tuple, List
 
 from dacite.cache import cache
 from dacite.config import Config
@@ -19,6 +19,7 @@ from dacite.exceptions import (
     DaciteFieldError,
     UnexpectedDataError,
     StrictUnionMatchError,
+    UnregisteredMetadataError,
 )
 from dacite.types import (
     is_instance,
@@ -30,6 +31,8 @@ from dacite.types import (
     is_init_var,
     extract_init_var,
     is_subclass,
+    is_annotated,
+    extract_annotation,
 )
 
 from dacite.generics import get_concrete_type_hints, get_fields, orig
@@ -93,9 +96,19 @@ def from_dict(data_class: Type[T], data: Data, config: Optional[Config] = None) 
 
 
 def _build_value(type_: Type, data: Any, config: Config) -> Any:
-    if is_init_var(type_):
-        type_ = extract_init_var(type_)
-    if type_ in config.type_hooks:
+    # Normalize InitVar and typing.Annotated wrappers before anything else. The
+    # annotated check comes first because an Annotated alias can be unhashable and
+    # must never reach a cached predicate or a dict lookup. Metadata hooks share
+    # their pipeline position with type hooks: both run before structural
+    # conversion, metadata first when both wrappers are present.
+    while True:
+        if is_annotated(type_):
+            type_, data = _build_annotated_value(type_=type_, data=data, config=config)
+        elif is_init_var(type_):
+            type_ = extract_init_var(type_)
+        else:
+            break
+    if _matches_type_hook(type_, config):
         data = config.type_hooks[type_](data)
     if is_optional(type_) and data is None:
         return data
@@ -115,11 +128,38 @@ def _build_value(type_: Type, data: Any, config: Config) -> Any:
     return data
 
 
+def _build_annotated_value(type_: Type, data: Any, config: Config) -> Tuple[Type, Any]:
+    inner_type, metadata = extract_annotation(type_)
+    # Metadata hooks share the type_hooks pipeline position: ordinary type hooks and
+    # metadata hooks are always applied before any structural conversion, in this order.
+    for marker in metadata:
+        if _is_mapping_key(marker, config.metadata_hooks):
+            data = config.metadata_hooks[marker](data, marker)
+        elif config.reject_unregistered_metadata:
+            raise UnregisteredMetadataError(marker=marker, field_type=type_)
+    return inner_type, data
+
+
+def _is_mapping_key(key: Any, mapping: Mapping[Any, Any]) -> bool:
+    # Unhashable keys (e.g. typing.Annotated aliases carrying unhashable metadata)
+    # can never be dict keys, so they cannot match and must not crash the lookup.
+    try:
+        return key in mapping
+    except TypeError:
+        return False
+
+
+def _matches_type_hook(type_: Type, config: Config) -> bool:
+    return _is_mapping_key(type_, config.type_hooks)
+
+
 def _build_value_for_union(union: Type, data: Any, config: Config) -> Any:
     types = extract_generic(union)
     if is_optional(union) and len(types) == 2:
         return _build_value(type_=types[0], data=data, config=config)
-    union_matches = {}
+    # Pairs instead of a dict keyed by type: a union member can be an unhashable
+    # typing.Annotated alias, which could never serve as a dict key.
+    union_matches: List[Tuple[Type, Any]] = []
     for inner_type in types:
         try:
             # noinspection PyBroadException
@@ -129,7 +169,7 @@ def _build_value_for_union(union: Type, data: Any, config: Config) -> Any:
                 continue
             if is_instance(value, inner_type):
                 if config.strict_unions_match:
-                    union_matches[inner_type] = value
+                    union_matches.append((inner_type, value))
                 else:
                     return value
         except DaciteError:
@@ -137,7 +177,7 @@ def _build_value_for_union(union: Type, data: Any, config: Config) -> Any:
     if config.strict_unions_match and union_matches:
         if len(union_matches) > 1:
             raise StrictUnionMatchError(union_matches)
-        return union_matches.popitem()[1]
+        return union_matches[0][1]
     if not config.check_types:
         return data
     raise UnionMatchError(field_type=union, value=data)

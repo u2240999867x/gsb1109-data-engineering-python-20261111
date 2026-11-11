@@ -61,6 +61,7 @@ Dacite supports following features:
 - forward references
 - collections
 - custom type hooks
+- `typing.Annotated` metadata hooks
 - case conversion
 
 ## Motivation
@@ -112,6 +113,8 @@ Configuration is a (data) class with following fields:
 - `strict`
 - `strict_unions_match`
 - `convert_key`
+- `metadata_hooks`
+- `reject_unregistered_metadata`
 
 The examples below show all features of `from_dict` function and usage
 of all `Config` parameters.
@@ -327,6 +330,85 @@ If a data class field type is a `Optional[T]` you can pass both -
 `Optional[T]` or just `T` - as a key in `type_hooks`. The same with generic 
 collections, e.g. when a field has type `List[T]` you can use `List[T]` to 
 transform whole collection or `T` to transform each item. 
+
+### Annotated metadata hooks
+
+Basic type conversion does not express rules attached to a value, such as its
+unit or a non-negativity constraint. You can attach arbitrary markers to a
+field with `typing.Annotated` and declare how each marker is interpreted via
+`Config.metadata_hooks` - a `{marker: callable}` mapping where the callable has
+the signature `Callable[[Any, Any], Any]` and receives the current value
+together with the matched marker instance.
+
+```python
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Annotated
+from dacite import Config, from_dict
+
+
+class Unit:
+    def __init__(self, unit):
+        self.unit = unit
+
+    def __eq__(self, other):
+        return isinstance(other, Unit) and self.unit == other.unit
+
+    def __hash__(self):
+        return hash(("Unit", self.unit))
+
+
+class NonNegative:
+    def __eq__(self, other):
+        return isinstance(other, NonNegative)
+
+    def __hash__(self):
+        return hash("NonNegative")
+
+
+def to_decimal(value, marker):
+    return Decimal(value)
+
+
+def check_non_negative(value, marker):
+    value = Decimal(value)
+    if value < 0:
+        raise ValueError(f"{value} must be non-negative")
+    return value
+
+
+@dataclass
+class Ledger:
+    gross: Annotated[Decimal, Unit("USD")]
+    net: Annotated[Decimal, NonNegative()]
+
+
+config = Config(
+    metadata_hooks={
+        Unit("USD"): to_decimal,
+        NonNegative(): check_non_negative,
+    }
+)
+
+result = from_dict(Ledger, {"gross": "12.50", "net": "3.25"}, config)
+
+assert result == Ledger(gross=Decimal("12.50"), net=Decimal("3.25"))
+```
+
+When a field carries several markers, their hooks are applied in the order the
+markers appear in the `Annotated` alias. Metadata hooks run in the same
+pipeline stage as ordinary type hooks - before any structural conversion - and
+when both are present the metadata hook runs first, then the type hook, then
+`cast`.
+
+Two fields sharing the same underlying type but carrying different markers
+stay distinct in the internal type cache, so their rules never leak into each
+other.
+
+Markers without a registered hook are ignored by default. Set
+`reject_unregistered_metadata=True` to reject them with an
+`UnregisteredMetadataError` whose message names the marker, the field and the
+two available policies.
 
 ### Casting
 

@@ -7,9 +7,9 @@ from typing import Any, Dict, Generic, List, Tuple, Type, TypeVar, get_type_hint
 from dacite.exceptions import DaciteError
 
 try:
-    from typing import get_args, get_origin, Literal  # type: ignore
+    from typing import get_args, get_origin, Literal, Annotated  # type: ignore
 except ImportError:
-    from typing_extensions import get_args, get_origin, Literal  # type: ignore
+    from typing_extensions import get_args, get_origin, Literal, Annotated  # type: ignore
 
 
 from .dataclasses import get_fields as dataclasses_get_fields
@@ -58,6 +58,14 @@ def __concretize(hint: Any, generics: Dict[TypeVar, Type], data_class: Type) -> 
     hint_origin = get_origin(hint)
     hint_args = get_args(hint)
     if hint_origin and hint_args and hint_origin is not Literal:
+        if hint_origin is Annotated:
+            # Only the underlying type participates in substitution. Metadata
+            # markers are application-defined (e.g. plain strings) and must not be
+            # mistaken for forward references or TypeVars.
+            concrete_origin = __concretize(hint_args[0], generics, data_class)
+            if concrete_origin != hint_args[0]:
+                return Annotated[(concrete_origin, *hint_args[1:])]
+            return hint
         concrete_hint_args = tuple(__concretize(a, generics, data_class) for a in hint_args)
         if concrete_hint_args != hint_args:
             if sys.version_info >= (3, 9):
@@ -100,6 +108,9 @@ def get_concrete_type_hints(data_class: Type, *args, **kwargs) -> Dict[str, Any]
                 __add_generics(base_origin, base_args, generics)
 
     data_class = orig(data_class)
+    if sys.version_info >= (3, 9):
+        # Preserve typing.Annotated metadata so metadata hooks can consume it.
+        kwargs.setdefault("include_extras", True)
     hints = get_type_hints(data_class, *args, **kwargs)
 
     for key, hint in hints.copy().items():

@@ -21,12 +21,15 @@ from dacite.types import (
     extract_init_var,
     is_type_generic,
     is_tuple,
+    is_annotated,
+    extract_annotation,
 )
 from tests.common import (
     literal_support,
     init_var_type_support,
     pep_604_support,
     type_hints_with_generic_collections_support,
+    annotated_support,
 )
 
 
@@ -410,3 +413,40 @@ def test_optional_and_union_none_does_not_pollute_scope_via_caching():
 @pep_604_support
 def test_optional_and_union_none_does_not_pollute_scope_via_caching_pep_604():
     is_generic_collection(str | None)
+
+
+@annotated_support
+def test_is_annotated_with_annotated():
+    from typing import Annotated
+
+    assert is_annotated(Annotated[int, "marker"])
+
+
+@annotated_support
+def test_is_annotated_with_non_annotated():
+    assert not is_annotated(int)
+
+
+@annotated_support
+def test_is_annotated_with_unhashable_metadata():
+    from typing import Annotated
+
+    assert is_annotated(Annotated[int, {"rule": "x"}])
+
+
+@annotated_support
+def test_extract_annotation():
+    from typing import Annotated
+
+    origin, metadata = extract_annotation(Annotated[int, "a", "b"])
+
+    assert origin is int
+    assert metadata == ("a", "b")
+
+
+@annotated_support
+def test_is_instance_with_annotated_type():
+    from typing import Annotated
+
+    assert is_instance(1, Annotated[int, "marker"])
+    assert not is_instance("x", Annotated[int, "marker"])

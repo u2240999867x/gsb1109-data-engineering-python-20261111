@@ -1,8 +1,10 @@
-from typing import Any, Type, Optional, Set, Dict
-from dacite.types import is_union
+from typing import Any, Type, Optional, Set, Dict, List, Tuple, Union
+from dacite.types import is_union, is_annotated, extract_annotation
 
 
 def _name(type_: Type) -> str:
+    if is_annotated(type_):
+        return _name(extract_annotation(type_)[0])
     return type_.__name__ if hasattr(type_, "__name__") and not is_union(type_) else str(type_)
 
 
@@ -52,12 +54,26 @@ class UnionMatchError(WrongTypeError):
 
 
 class StrictUnionMatchError(DaciteFieldError):
-    def __init__(self, union_matches: Dict[Type, Any], field_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        union_matches: Union[Dict[Type, Any], List[Tuple[Type, Any]]],
+        field_path: Optional[str] = None,
+    ) -> None:
         super().__init__(field_path=field_path)
-        self.union_matches = union_matches
+        if isinstance(union_matches, dict):
+            self.union_matches: Optional[Dict[Type, Any]] = union_matches
+            self._conflicting_types = list(union_matches.keys())
+        else:
+            # Member types can be unhashable (typing.Annotated aliases), in which
+            # case they cannot be stored as dict keys.
+            try:
+                self.union_matches = dict(union_matches)
+            except TypeError:
+                self.union_matches = None
+            self._conflicting_types = [type_ for type_, _ in union_matches]
 
     def __str__(self) -> str:
-        conflicting_types = ", ".join(_name(type_) for type_ in self.union_matches)
+        conflicting_types = ", ".join(_name(type_) for type_ in self._conflicting_types)
         return f'can not choose between possible Union matches for field "{self.field_path}": {conflicting_types}'
 
 
@@ -78,3 +94,17 @@ class UnexpectedDataError(DaciteError):
     def __str__(self) -> str:
         formatted_keys = ", ".join(f'"{key}"' for key in self.keys)
         return f"can not match {formatted_keys} to any data class field"
+
+
+class UnregisteredMetadataError(DaciteFieldError):
+    def __init__(self, marker: Any, field_type: Type, field_path: Optional[str] = None) -> None:
+        super().__init__(field_path=field_path)
+        self.marker = marker
+        self.field_type = field_type
+
+    def __str__(self) -> str:
+        return (
+            f'unregistered metadata marker "{self.marker!r}" found in type "{_name(self.field_type)}" '
+            f'of field "{self.field_path}" - either register a hook for it in '
+            f"Config.metadata_hooks or set Config.reject_unregistered_metadata=False to ignore it"
+        )

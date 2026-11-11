@@ -2,7 +2,7 @@ from dataclasses import Field, MISSING, _FIELDS, _FIELD, _FIELD_INITVAR  # type:
 from typing import Type, Any, TypeVar, List
 
 from dacite.cache import cache
-from dacite.types import is_optional
+from dacite.types import is_optional, is_annotated, extract_annotation
 
 T = TypeVar("T", bound=Any)
 
@@ -16,7 +16,9 @@ def get_default_value_for_field(field: Field, type_: Type) -> Any:
         return field.default
     elif field.default_factory != MISSING:  # type: ignore
         return field.default_factory()  # type: ignore
-    elif is_optional(type_):
+    if is_annotated(type_):
+        type_ = extract_annotation(type_)[0]
+    if is_optional(type_):
         return None
     raise DefaultValueNotFoundError()
 

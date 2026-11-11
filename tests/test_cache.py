@@ -27,3 +27,23 @@ def test_cache_from_function():
     cache(function)()
 
     function.assert_called_once()
+
+
+def test_cache_bypasses_unhashable_arguments():
+    function = Mock(side_effect=lambda value: value)
+
+    cached = cache(function)
+    unhashable = {"key": "value"}
+
+    assert cached(unhashable) is unhashable
+    assert cached(unhashable) is unhashable
+
+    assert function.call_count == 2
+    assert cached.cache_info().hits == 0
+
+
+def test_cache_keeps_introspection_api():
+    cached = cache(Mock())
+
+    assert hasattr(cached, "cache_info")
+    assert hasattr(cached, "cache_clear")

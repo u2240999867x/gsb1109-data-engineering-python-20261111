@@ -6,6 +6,14 @@ try:
 except ImportError:
     from typing_extensions import get_origin  # type: ignore
 
+try:
+    from typing import Annotated  # type: ignore
+except ImportError:
+    try:
+        from typing_extensions import Annotated  # type: ignore
+    except ImportError:
+        Annotated = None  # type: ignore
+
 from dacite.cache import cache
 
 T = TypeVar("T", bound=Any)
@@ -64,6 +72,16 @@ def is_literal(type_: Type) -> bool:
         return is_generic(type_) and type_.__origin__ == Literal
     except ImportError:
         return False
+
+
+def is_annotated(type_: Any) -> bool:
+    # Not cached on purpose: typing.Annotated aliases can be unhashable (e.g. when
+    # their metadata contains unhashable markers), so they must never reach lru_cache.
+    return Annotated is not None and get_origin(type_) is Annotated
+
+
+def extract_annotation(type_: Any) -> Tuple[Type, tuple]:
+    return type_.__origin__, tuple(type_.__metadata__)
 
 
 @cache
@@ -136,6 +154,8 @@ def is_generic_dataclass(type_: Type) -> bool:
 
 
 def is_instance(value: Any, type_: Type) -> bool:
+    if is_annotated(type_):
+        return is_instance(value, extract_annotation(type_)[0])
     try:
         # As described in PEP 484 - section: "The numeric tower"
         if (type_ in [float, complex] and isinstance(value, (int, float))) or isinstance(value, type_):

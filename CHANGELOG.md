@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-...
+### Added
+
+- Support `typing.Annotated` metadata. `Config.metadata_hooks` lets callers
+  register a callable per marker (`{marker: Callable[[value, marker], value]}`),
+  applied in annotation order before ordinary type hooks and casting.
+- Add `Config.reject_unregistered_metadata` flag. Unregistered markers are
+  ignored by default; when enabled they raise `UnregisteredMetadataError` with
+  a diagnostic naming the marker, the field and the active policy.
+- Export `UnregisteredMetadataError`.
+
+### Fixed
+
+- Preserve `typing.Annotated` metadata when resolving type hints and keep two
+  fields with the same underlying type but different metadata distinct in the
+  type cache.
+- Do not treat `typing.Annotated` metadata markers (e.g. plain strings) as
+  forward references during generic type substitution.
+- Handle `typing.Annotated` aliases whose metadata is unhashable without
+  breaking the cached type predicates.
 
 ## [1.9.2] - 2025-02-05
 

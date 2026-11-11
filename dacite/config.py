@@ -11,6 +11,11 @@ else:
     cached_property = property  # type: ignore  # pylint: disable=invalid-name
 
 
+# A metadata hook receives the input value together with the marker found in a
+# typing.Annotated alias and returns the value after applying the marker's rule.
+MetadataHook = Callable[[Any, Any], Any]
+
+
 @dataclass
 class Config:
     type_hooks: Dict[Type, Callable[[Any], Any]] = field(default_factory=dict)
@@ -20,6 +25,8 @@ class Config:
     strict: bool = False
     strict_unions_match: bool = False
     convert_key: Callable[[str], str] = field(default_factory=lambda: lambda x: x)
+    metadata_hooks: Dict[Any, MetadataHook] = field(default_factory=dict)
+    reject_unregistered_metadata: bool = False
 
     @cached_property
     def hashable_forward_references(self) -> Optional[FrozenDict]:
