@@ -43,6 +43,15 @@ from glom.matching import (M,
                            CheckError)
 from glom.mutation import Assign, Delete, assign, delete, PathDeleteError
 
+# pure-data, configuration-safe spec loading (no source strings or imports).
+# DataSpecError stays in glom.spec_data because it is a load-time validation
+# error rather than a glom.glom() runtime error.
+from glom.spec_data import (DataSpecRegistry,
+                            load_data_spec,
+                            loads_data_spec,
+                            load_data_spec_file,
+                            register_data_op)
+
 # there's no -ion word that really fits what "streaming" means.
 # generation, production, iteration, all have more relevant meanings
 # elsewhere. (maybe procrastination :P)

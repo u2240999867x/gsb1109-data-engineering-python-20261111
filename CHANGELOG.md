@@ -12,6 +12,15 @@ The glom team's approach to updates can be summed up as:
 Check this page when upgrading, we strive to keep the updates
 summarized and well-linked.
 
+## Unreleased
+
+- Add `glom.spec_data`, a pure-data spec loader for untrusted,
+  configuration-driven field mappings. Configs use only JSON/YAML data and
+  operations registered through `DataSpecRegistry`; source strings,
+  callables, and imports are rejected, and unregistered operations or
+  malformed nodes raise `DataSpecError` with the full config location at
+  load time. The existing Python spec API is unchanged.
+
 ## 25.12.0
 
 _(December 28, 2025)_
