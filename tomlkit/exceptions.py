@@ -232,3 +232,12 @@ class ConvertError(TypeError, ValueError, TOMLKitError):
     It should be a TypeError, but due to historical reasons
     it needs to subclass ValueError as well.
     """
+
+
+class MigrationError(TOMLKitError):
+    """Raised when a structural migration cannot be performed safely.
+
+    The document is left untouched: the migration builds its result on
+    copies and only replaces the original item once every part has been
+    attributed, so raising this error never leaves a half-migrated table.
+    """

@@ -21,6 +21,7 @@ from tomlkit.api import parse
 from tomlkit.api import register_encoder
 from tomlkit.api import string
 from tomlkit.api import table
+from tomlkit.api import table_to_aot
 from tomlkit.api import time
 from tomlkit.api import unregister_encoder
 from tomlkit.api import value
@@ -52,6 +53,7 @@ __all__ = [
     "register_encoder",
     "string",
     "table",
+    "table_to_aot",
     "time",
     "unregister_encoder",
     "value",

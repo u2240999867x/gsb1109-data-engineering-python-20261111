@@ -91,6 +91,52 @@ table. Read the comment with ``trivia.comment`` and update it with ``comment()``
     [database]
     enabled = false # Updated database comment
 
+Migrating a table to an array of tables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A configuration that used to allow a single ``[source]`` table may need to
+accept several sources stored as an array of tables (``[[source]]``).
+``table_to_aot()`` performs that structural migration in place, turning the
+existing table into the first (and only) array element while preserving every
+value, comment and unrelated table::
+
+    >>> from tomlkit import parse, dumps, table_to_aot
+
+    >>> content = '''
+    ... [source]
+    ... url = "postgres://localhost"
+    ...
+    ... [source.pool]
+    ... max = 10
+    ...
+    ... [other]
+    ... keep = true
+    ... '''
+    >>> doc = parse(content)
+    >>> _ = table_to_aot(doc, "source")
+    >>> print(dumps(doc), end="")
+    <BLANKLINE>
+    [[source]]
+    url = "postgres://localhost"
+    <BLANKLINE>
+    [source.pool]
+    max = 10
+    <BLANKLINE>
+    [other]
+    keep = true
+
+Nested configuration (``[source.pool]``) and sub-tables declared separately
+later in the document stay attached to the same source and become children of
+the single array element, even when unrelated tables appear in between.
+
+The migration builds its result on copies and only replaces the original item
+once every fragment has been attributed, so a failure leaves the document
+unchanged. When a declaration cannot be attributed safely -- for example a
+later same-name table that opens its own header -- it raises
+``tomlkit.exceptions.MigrationError`` instead of guessing. It can also be
+applied to a nested table by passing the parent container as the first
+argument, e.g. ``table_to_aot(doc["parent"], "source")``.
+
 Writing
 -------
 

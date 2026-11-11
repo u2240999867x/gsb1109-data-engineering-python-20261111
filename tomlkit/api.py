@@ -36,6 +36,7 @@ from tomlkit.items import Time
 from tomlkit.items import Trivia
 from tomlkit.items import Whitespace
 from tomlkit.items import item as item
+from tomlkit.migration import table_to_aot as table_to_aot
 from tomlkit.parser import Parser
 from tomlkit.toml_document import TOMLDocument as TOMLDocument
 

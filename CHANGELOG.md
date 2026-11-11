@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `table_to_aot(container, key)` to migrate a single plain table (e.g. a one-source `[source]` config) into a one-element array of tables (`[[source]]`). Nested configuration and sub-tables declared separately later in the document stay attached to the same source, values, comments and unrelated tables are preserved, and a declaration whose ownership cannot be determined raises `MigrationError` and leaves the document unchanged instead of moving every later sub-table into the first element.
+
 ### Changed
 
 - Speed up repeated array appends by keeping existing indexes instead of rebuilding them.
