@@ -19,6 +19,24 @@ from .core import GlomError, glom, T, MODE, bbrepr, bbformat, format_invocation,
 
 _MISSING = make_sentinel('_MISSING')
 
+# scope key under which the current Match's capture bindings are kept
+CAPTURES = make_sentinel('CAPTURES')
+
+
+def _save_captures(scope):
+    """snapshot the current capture bindings (if any) so they can be
+    restored if a branch/item fails to match"""
+    captures = scope.get(CAPTURES)
+    if captures is None:
+        return None, None
+    return captures, dict(captures)
+
+
+def _restore_captures(captures, saved):
+    if captures is not None:
+        captures.clear()
+        captures.update(saved)
+
 
 # NOTE: it is important that MatchErrors be cheap to construct,
 # because negative matches are part of normal control flow
@@ -147,12 +165,19 @@ class Match:
 
     def glomit(self, target, scope):
         scope[MODE] = _glom_match
+        scope[CAPTURES] = {}
         try:
             ret = scope[glom](target, self.spec, scope)
         except GlomError:
+            del scope[CAPTURES]  # don't leak partial bindings
             if self.default is _MISSING:
                 raise
             ret = arg_val(target, self.default, scope)
+        else:
+            captures = scope[CAPTURES]
+            del scope[CAPTURES]
+            if captures:  # expose bindings to downstream specs
+                scope.update(captures)
         return ret
 
     def verify(self, target):
@@ -187,6 +212,78 @@ class Match:
 
     def __repr__(self):
         return f'{self.__class__.__name__}({bbrepr(self.spec)})'
+
+
+class Capture:
+    """Used inside a :class:`~glom.Match` spec, binds the matched value
+    to *name* so that other parts of the same match can reference it.
+
+    The first occurrence of a name captures the value; subsequent
+    occurrences of the same name only check that their target equals
+    the already-captured value -- they never overwrite it.
+
+    For example, a transaction record where the buyer id shows up in
+    two nested positions can be validated for consistency::
+
+      >>> spec = Match({'buyer': {'id': Capture('buyer_id', int)},
+      ...               'payment': {'payer_id': Capture('buyer_id')}})
+      >>> glom({'buyer': {'id': 7}, 'payment': {'payer_id': 7}}, spec)
+      {'buyer': {'id': 7}, 'payment': {'payer_id': 7}}
+      >>> glom({'buyer': {'id': 7}, 'payment': {'payer_id': 8}}, spec)
+      Traceback (most recent call last):
+      ...
+      MatchError: capture 'buyer_id' already bound to 7, not 8
+
+    An optional *spec* can be passed to validate (or transform) the
+    value at capture time; it is applied at every occurrence, before
+    the consistency check.
+
+    Captures made while matching each item of a :class:`list` (or
+    :class:`set`/:class:`frozenset`) spec are scoped to that item, so
+    records in a list are matched independently:
+
+      >>> spec = Match([{'id': Capture('rid'), 'ref': Capture('rid')}])
+      >>> glom([{'id': 1, 'ref': 1}, {'id': 2, 'ref': 2}], spec)
+      [{'id': 1, 'ref': 1}, {'id': 2, 'ref': 2}]
+
+    On a successful :class:`~glom.Match`, the bindings are added to
+    the scope (like :class:`~glom.Regex` group captures), so
+    downstream specs can use them via :attr:`~glom.S`. If the match
+    fails, no partial bindings are left behind.
+
+    Args:
+       name: The name to bind the matched value to.
+       spec: An optional sub-spec the value must also match before
+         being bound (or checked).
+
+    """
+    __slots__ = ('name', 'spec')
+
+    def __init__(self, name, spec=_MISSING):
+        hash(name)  # ensure the name is a valid binding key
+        self.name, self.spec = name, spec
+
+    def glomit(self, target, scope):
+        captures = scope.get(CAPTURES)
+        if captures is None:
+            raise MatchError(
+                "{0!r} used outside of a Match capture context", self)
+        if self.spec is not _MISSING:
+            target = scope[glom](target, self.spec, scope)
+        if self.name in captures:
+            bound = captures[self.name]
+            if target != bound:
+                raise MatchError(
+                    "capture {0!r} already bound to {1!r}, not {2!r}",
+                    self.name, bound, target)
+            return bound
+        captures[self.name] = target
+        return target
+
+    def __repr__(self):
+        if self.spec is _MISSING:
+            return f'{self.__class__.__name__}({bbrepr(self.name)})'
+        return f'{self.__class__.__name__}({bbrepr(self.name)}, {bbrepr(self.spec)})'
 
 
 _RE_FULLMATCH = getattr(re, "fullmatch", None)
@@ -336,10 +433,11 @@ class Or(_Bool):
 
     def _glomit(self, target, scope):
         for child in self.children[:-1]:
+            captures, saved = _save_captures(scope)
             try:  # one child must match without exception
                 return scope[glom](target, child, scope)
             except GlomError:
-                pass
+                _restore_captures(captures, saved)
         return scope[glom](target, self.children[-1], scope)
 
     def __or__(self, other):
@@ -361,9 +459,11 @@ class Not(_Bool):
         self.child = child
 
     def glomit(self, target, scope):
+        captures, saved = _save_captures(scope)
         try:  # one child must match without exception
             scope[glom](target, self.child, scope)
         except GlomError:
+            _restore_captures(captures, saved)
             return target
         else:
             raise GlomError("child shouldn't have passed", self.child)
@@ -722,19 +822,24 @@ def _glom_match(target, spec, scope):
             raise TypeMatchError(type(target), type(spec))
         result = []
         for item in target:
-            for child in spec:
-                try:
-                    result.append(scope[glom](item, child, scope))
-                    break
-                except GlomError as e:
-                    last_error = e
-            else:  # did not break, something went wrong
-                if target and not spec:
-                    raise MatchError(
-                        "{0!r} does not match empty {1}", target, type(spec).__name__)
-                # NOTE: unless error happens above, break will skip else branch
-                # so last_error will have been assigned
-                raise last_error
+            # each item gets an independent capture scope
+            captures, saved = _save_captures(scope)
+            try:
+                for child in spec:
+                    try:
+                        result.append(scope[glom](item, child, scope))
+                        break
+                    except GlomError as e:
+                        last_error = e
+                else:  # did not break, something went wrong
+                    if target and not spec:
+                        raise MatchError(
+                            "{0!r} does not match empty {1}", target, type(spec).__name__)
+                    # NOTE: unless error happens above, break will skip else branch
+                    # so last_error will have been assigned
+                    raise last_error
+            finally:
+                _restore_captures(captures, saved)
         if type(spec) is not list:
             return type(spec)(result)
         return result
@@ -847,9 +952,11 @@ class Switch:
 
     def glomit(self, target, scope):
         for keyspec, valspec in self.cases:
+            captures, saved = _save_captures(scope)
             try:
                 scope[glom](target, keyspec, scope)
             except GlomError as ge:
+                _restore_captures(captures, saved)
                 continue
             return scope[glom](target, valspec, chain_child(scope))
         if self.default is not _MISSING:

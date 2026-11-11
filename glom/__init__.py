@@ -38,6 +38,7 @@ from glom.matching import (M,
                            Regex,
                            Optional,
                            Required,
+                           Capture,
                            Switch,
                            Check,
                            CheckError)

@@ -12,6 +12,16 @@ The glom team's approach to updates can be summed up as:
 Check this page when upgrading, we strive to keep the updates
 summarized and well-linked.
 
+## Unreleased
+
+- Add `glom.Capture` for named captures in `Match` specs: the first
+  occurrence of a name binds the matched value, later occurrences of
+  the same name check against the captured value instead of
+  overwriting it. Captures are scoped per item in list/set specs,
+  bindings are exposed to downstream specs (via `S`) only on a
+  successful match, and failed matches leave no partial bindings
+  behind.
+
 ## 25.12.0
 
 _(December 28, 2025)_

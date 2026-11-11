@@ -6,8 +6,8 @@ import pytest
 from glom import glom, S, Val, T, A, Fill, Ref, Coalesce, STOP, Switch
 from glom.matching import (
     Match, M, MatchError, TypeMatchError, And, Or, Not,
-    Optional, Required, Regex)
-from glom.core import Auto, SKIP, Ref
+    Optional, Required, Regex, Capture)
+from glom.core import Auto, SKIP, Ref, GlomError
 
 try:
     unicode
@@ -508,3 +508,97 @@ def test_switch():
 
 def test_nested_dict():
     assert glom({1: 2}, Match({A.t: S.t})) == {1: 1}
+
+
+def test_capture():
+    # named captures let two nested positions declare they must agree
+    record_spec = Match({
+        'buyer': {'id': Capture('buyer_id', int)},
+        'payment': {'payer_id': Capture('buyer_id', int)}})
+    glom({'buyer': {'id': 7}, 'payment': {'payer_id': 7}}, record_spec)
+    with pytest.raises(MatchError):
+        glom({'buyer': {'id': 7}, 'payment': {'payer_id': 8}}, record_spec)
+    # type checks still apply at each position
+    with pytest.raises(TypeMatchError):
+        glom({'buyer': {'id': '7'}, 'payment': {'payer_id': 7}}, record_spec)
+    with pytest.raises(TypeMatchError):
+        glom({'buyer': {'id': 7}, 'payment': {'payer_id': '7'}}, record_spec)
+
+    # later same-name references check the captured value, never overwrite
+    spec = Match((Capture('x'), Capture('x'), Capture('x')))
+    assert glom((3, 3, 3), spec) == (3, 3, 3)
+    with pytest.raises(MatchError):
+        glom((3, 3, 4), spec)
+    with pytest.raises(MatchError):
+        glom((3, 4, 3), spec)
+
+    # captures without a sub-spec match anything
+    assert glom({'a': None, 'b': None}, Match({'a': Capture('v'), 'b': Capture('v')})) == \
+        {'a': None, 'b': None}
+
+    # Capture used outside of a Match capture context raises
+    with pytest.raises(MatchError):
+        glom(1, Capture('x'))
+
+    # repr
+    assert repr(Capture('x')) == "Capture('x')"
+    assert repr(Capture('x', int)) == "Capture('x', int)"
+
+
+def test_capture_list_items_independent():
+    # each record in a list gets its own capture scope
+    spec = Match([{'id': Capture('rid'), 'ref': Capture('rid')}])
+    glom([{'id': 1, 'ref': 1}, {'id': 2, 'ref': 2}], spec)
+    with pytest.raises(MatchError):
+        glom([{'id': 1, 'ref': 1}, {'id': 2, 'ref': 3}], spec)
+    with pytest.raises(MatchError):
+        glom([{'id': 1, 'ref': 2}], spec)
+
+    # same for sets
+    glom({1, 2}, Match({Capture('anything')}))
+
+    # captures made outside the list are still visible (and checkable) inside
+    spec = Match({'order_id': Capture('oid'),
+                  'items': [{'order_id': Capture('oid')}],
+                  'audit_id': Capture('oid')})
+    glom({'order_id': 9, 'items': [{'order_id': 9}, {'order_id': 9}], 'audit_id': 9}, spec)
+    with pytest.raises(MatchError):
+        glom({'order_id': 9, 'items': [{'order_id': 9}], 'audit_id': 10}, spec)
+    with pytest.raises(MatchError):
+        glom({'order_id': 9, 'items': [{'order_id': 8}], 'audit_id': 9}, spec)
+
+
+def test_capture_atomicity():
+    # a failed Match does not leak partial bindings into later branches
+    spec = Match(Or(
+        {'a': Capture('x'), 'b': Capture('x')},
+        {'a': 1, 'b': Capture('x')}))
+    assert glom({'a': 1, 'b': 2}, spec) == {'a': 1, 'b': 2}
+
+    # failed list items do not leak partial bindings either
+    spec = Match([Or({'v': Capture('y'), 'w': Capture('y')},
+                     {'v': 1, 'w': Capture('y')})])
+    glom([{'v': 1, 'w': 2}], spec)
+
+    # Not() discards captures from its (successful) child when it fails
+    with pytest.raises(GlomError):
+        glom(1, Match(And(Not(Capture('z')), Capture('z'))))
+
+    # on success, bindings are exposed to downstream specs via S
+    assert glom({'a': 5}, (Match({'a': Capture('x')}), S['x'])) == 5
+    assert glom({'a': 5, 'b': 5},
+                (Match({'a': Capture('x'), 'b': Capture('x')}), S['x'])) == 5
+
+    # and a failed Match leaves nothing behind
+    with pytest.raises(MatchError):
+        glom({'a': 5, 'b': 6}, Match({'a': Capture('x'), 'b': Capture('x')}))
+
+
+def test_capture_default_match_semantics_unchanged():
+    # Match without captures behaves exactly as before
+    assert glom({'id': 1}, Match({'id': int})) == {'id': 1}
+    assert glom([1, 2], Match([int])) == [1, 2]
+    assert glom('a', Match('a', default='b')) == 'a'
+    assert glom('c', Match('a', default='b')) == 'b'
+    with pytest.raises(MatchError):
+        glom({'id': '1'}, Match({'id': int}))

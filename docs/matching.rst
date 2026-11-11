@@ -47,6 +47,15 @@ and :class:`~glom.Optional`.
 
 .. autoclass:: glom.Required
 
+Named captures
+~~~~~~~~~~~~~~
+
+When the same value appears in multiple nested positions,
+:class:`~glom.Capture` can bind it to a name and require that later
+positions match the captured value.
+
+.. autoclass:: glom.Capture
+
 ``M`` Expressions
 ~~~~~~~~~~~~~~~~~
 
