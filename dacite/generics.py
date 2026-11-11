@@ -81,10 +81,10 @@ def orig(data_class: Type) -> Any:
     return get_origin(data_class)
 
 
-def get_concrete_type_hints(data_class: Type, *args, **kwargs) -> Dict[str, Any]:
+def __extract_generics(data_class: Type) -> Dict[TypeVar, Type]:
     """
-    An overwrite of typing.get_type_hints supporting generics and forward references,
-    i.e. substituting concrete types in type vars and references.
+    Collect (type var, concrete type) entries along the whole inheritance chain,
+    so that type vars bound by any (in)direct parent are resolved as well.
     """
     generics: Dict[TypeVar, Type] = {}
 
@@ -92,12 +92,25 @@ def get_concrete_type_hints(data_class: Type, *args, **kwargs) -> Dict[str, Any]
     dc_args = get_args(data_class)
     __add_generics(dc_origin, dc_args, generics)
 
-    if hasattr(data_class, "__orig_bases__"):
-        for base in data_class.__orig_bases__:
+    for cls in getattr(orig(data_class), "__mro__", []):
+        for base in getattr(cls, "__orig_bases__", []):
             base_origin = get_origin(base)
-            base_args = get_args(base)
-            if base_origin is not Generic:
-                __add_generics(base_origin, base_args, generics)
+            if base_origin is None or base_origin is Generic:
+                continue
+            # substitute already known type vars within the base's args,
+            # e.g. `class Mid(Base[T], Generic[T])` used as `Mid[int]`
+            base_args = tuple(__concretize(arg, generics, cls) for arg in get_args(base))
+            __add_generics(base_origin, base_args, generics)
+
+    return generics
+
+
+def get_concrete_type_hints(data_class: Type, *args, **kwargs) -> Dict[str, Any]:
+    """
+    An overwrite of typing.get_type_hints supporting generics and forward references,
+    i.e. substituting concrete types in type vars and references.
+    """
+    generics = __extract_generics(data_class)
 
     data_class = orig(data_class)
     hints = get_type_hints(data_class, *args, **kwargs)
@@ -106,6 +119,13 @@ def get_concrete_type_hints(data_class: Type, *args, **kwargs) -> Dict[str, Any]
         hints[key] = __concretize(hint, generics, data_class)
 
     return hints
+
+
+def extract_type_vars(hint: Any) -> List[TypeVar]:
+    """Collect all (still unbound) type vars occurring within a type hint."""
+    if isinstance(hint, TypeVar):
+        return [hint]
+    return [type_var for arg in get_args(hint) for type_var in extract_type_vars(arg)]
 
 
 def get_fields(data_class: Type) -> List[Field]:

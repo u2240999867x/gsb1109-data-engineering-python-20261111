@@ -19,6 +19,7 @@ from dacite.exceptions import (
     DaciteFieldError,
     UnexpectedDataError,
     StrictUnionMatchError,
+    UnboundTypeVarError,
 )
 from dacite.types import (
     is_instance,
@@ -32,7 +33,7 @@ from dacite.types import (
     is_subclass,
 )
 
-from dacite.generics import get_concrete_type_hints, get_fields, orig
+from dacite.generics import get_concrete_type_hints, get_fields, orig, extract_type_vars
 
 T = TypeVar("T")
 
@@ -62,6 +63,10 @@ def from_dict(data_class: Type[T], data: Data, config: Optional[Config] = None) 
 
     for field in data_class_fields:
         field_type = data_class_hints[field.name]
+        if config.check_types:
+            type_vars = extract_type_vars(field_type)
+            if type_vars:
+                raise UnboundTypeVarError(type_var=type_vars[0], field_path=field.name)
         key = config.convert_key(field.name)
 
         if key in data:

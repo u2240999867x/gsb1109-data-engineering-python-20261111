@@ -1,4 +1,4 @@
-from typing import Any, Type, Optional, Set, Dict
+from typing import Any, Type, Optional, Set, Dict, TypeVar
 from dacite.types import is_union
 
 
@@ -59,6 +59,18 @@ class StrictUnionMatchError(DaciteFieldError):
     def __str__(self) -> str:
         conflicting_types = ", ".join(_name(type_) for type_ in self.union_matches)
         return f'can not choose between possible Union matches for field "{self.field_path}": {conflicting_types}'
+
+
+class UnboundTypeVarError(DaciteFieldError):
+    def __init__(self, type_var: TypeVar, field_path: Optional[str] = None):
+        super().__init__(field_path=field_path)
+        self.type_var = type_var
+
+    def __str__(self) -> str:
+        return (
+            f'can not resolve unbound type variable "{self.type_var}" for field "{self.field_path}" - '
+            "provide a concrete type, e.g. by parameterizing the data class"
+        )
 
 
 class ForwardReferenceError(DaciteError):
