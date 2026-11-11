@@ -13,6 +13,10 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- Support recursive [PEP 695](https://peps.python.org/pep-0695/) generic type aliases, such as `type Tree[T] = Node[T]` for a recursive _attrs_ class or dataclass `Node[T]`.
+  Each specialization (for example `Tree[int]` and `Tree[str]`) is structured and unstructured with its own type arguments applied at every nesting level, and stringified forward references to the alias are resolved.
+  Directly self-referential generic aliases (for example `type Tree[T] = T | list[Tree[T]]`) now raise a clear error explaining they are unsupported.
+
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 
