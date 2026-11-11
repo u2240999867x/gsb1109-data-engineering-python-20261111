@@ -381,3 +381,159 @@ class TestJoin(AgateTestCase):
             (None, 2, 'c', None, 2, 'c'),
             (7, 9, 'z', None, None, None)
         ])
+
+    def test_join_validate_many_to_one(self):
+        left_rows = (
+            (1, 4, 'a'),
+            (1, 3, 'b'),
+            (2, 2, 'c')
+        )
+
+        right_rows = (
+            (1, 4, 'a'),
+            (2, 3, 'b')
+        )
+
+        left = Table(left_rows, self.left_column_names, self.column_types)
+        right = Table(right_rows, self.right_column_names, self.column_types)
+
+        new_table = left.join(right, 'one', 'four', validate='many_to_one')
+
+        self.assertRows(new_table, [
+            (1, 4, 'a', 4, 'a'),
+            (1, 3, 'b', 4, 'a'),
+            (2, 2, 'c', 3, 'b')
+        ])
+
+    def test_join_validate_many_to_one_inflation(self):
+        left_rows = (
+            (1, 4, 'a'),
+            (1, 3, 'b'),
+            (2, 2, 'c')
+        )
+
+        right_rows = (
+            (1, 4, 'a'),
+            (1, 5, 'x'),
+            (2, 3, 'b')
+        )
+
+        left = Table(left_rows, self.left_column_names, self.column_types)
+        right = Table(right_rows, self.right_column_names, self.column_types)
+
+        with self.assertRaises(ValueError) as error:
+            left.join(right, 'one', 'four', validate='many_to_one')
+
+        message = str(error.exception)
+
+        self.assertIn('many_to_one', message)
+        self.assertIn('"1"', message)
+        self.assertIn('left: 2 rows', message)
+        self.assertIn('right: 2 rows', message)
+
+    def test_join_validate_many_to_one_unmatched_right_duplicates(self):
+        left_rows = (
+            (1, 4, 'a'),
+            (2, 3, 'b')
+        )
+
+        right_rows = (
+            (1, 4, 'a'),
+            (3, 5, 'x'),
+            (3, 6, 'y')
+        )
+
+        left = Table(left_rows, self.left_column_names, self.column_types)
+        right = Table(right_rows, self.right_column_names, self.column_types)
+
+        new_table = left.join(right, 'one', 'four', validate='many_to_one')
+
+        self.assertRows(new_table, [
+            (1, 4, 'a', 4, 'a'),
+            (2, 3, 'b', None, None)
+        ])
+
+    def test_join_validate_many_to_one_unmatched_left_rows(self):
+        left_rows = (
+            (1, 4, 'a'),
+            (3, 2, 'c')
+        )
+
+        right_rows = (
+            (1, 4, 'a'),
+            (2, 3, 'b')
+        )
+
+        left = Table(left_rows, self.left_column_names, self.column_types)
+        right = Table(right_rows, self.right_column_names, self.column_types)
+
+        new_table = left.join(right, 'one', 'four', validate='many_to_one')
+
+        self.assertRows(new_table, [
+            (1, 4, 'a', 4, 'a'),
+            (3, 2, 'c', None, None)
+        ])
+
+        new_table = left.join(right, 'one', 'four', inner=True, validate='many_to_one')
+
+        self.assertRows(new_table, [
+            (1, 4, 'a', 4, 'a')
+        ])
+
+    def test_join_validate_one_to_many(self):
+        left_rows = (
+            (1, 4, 'a'),
+            (2, 3, 'b')
+        )
+
+        right_rows = (
+            (1, 4, 'a'),
+            (1, 5, 'x')
+        )
+
+        left = Table(left_rows, self.left_column_names, self.column_types)
+        right = Table(right_rows, self.right_column_names, self.column_types)
+
+        new_table = left.join(right, 'one', 'four', validate='one_to_many')
+
+        self.assertRows(new_table, [
+            (1, 4, 'a', 4, 'a'),
+            (1, 4, 'a', 5, 'x'),
+            (2, 3, 'b', None, None)
+        ])
+
+        with self.assertRaises(ValueError) as error:
+            left.join(right, 'one', 'four', validate='one_to_one')
+
+        self.assertIn('"1"', str(error.exception))
+
+    def test_join_validate_one_to_one(self):
+        new_table = self.left.join(self.right, 'one', 'four', validate='one_to_one')
+
+        self.assertRows(new_table, [
+            (1, 4, 'a', 4, 'a'),
+            (2, 3, 'b', 3, 'b'),
+            (None, 2, 'c', 2, 'c')
+        ])
+
+    def test_join_validate_many_to_many(self):
+        left_rows = (
+            (1, 4, 'a'),
+            (1, 3, 'b')
+        )
+
+        right_rows = (
+            (1, 4, 'a'),
+            (1, 5, 'x')
+        )
+
+        left = Table(left_rows, self.left_column_names, self.column_types)
+        right = Table(right_rows, self.right_column_names, self.column_types)
+
+        new_table = left.join(right, 'one', 'four', validate='many_to_many')
+
+        self.assertEqual(len(new_table.rows), 4)
+
+    def test_join_validate_invalid(self):
+        with self.assertRaises(ValueError):
+            self.left.join(self.right, 'one', 'four', validate='one_to_none')

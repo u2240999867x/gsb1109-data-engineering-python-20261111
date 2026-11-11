@@ -1,9 +1,55 @@
 from agate import utils
 from agate.rows import Row
 
+VALIDATE_OPTIONS = ('one_to_one', 'one_to_many', 'many_to_one', 'many_to_many')
+
+
+def _validate_join(left_data, right_data, validate):
+    """
+    Verify that the join keys satisfy the declared relationship. Raises a
+    :class:`ValueError` identifying the keys that would inflate the join,
+    along with their row counts on both sides.
+    """
+    left_counts = {}
+
+    for value in left_data:
+        left_counts[value] = left_counts.get(value, 0) + 1
+
+    right_counts = {}
+
+    for value in right_data:
+        right_counts[value] = right_counts.get(value, 0) + 1
+
+    violations = {}
+
+    if validate in ('many_to_one', 'one_to_one'):
+        for value, right_count in right_counts.items():
+            if right_count > 1 and value in left_counts:
+                violations[value] = (left_counts[value], right_count)
+
+    if validate in ('one_to_many', 'one_to_one'):
+        for value, left_count in left_counts.items():
+            if left_count > 1 and value in right_counts:
+                violations[value] = (left_count, right_counts[value])
+
+    if violations:
+        details = ', '.join(
+            '"%s" (left: %i rows, right: %i rows)' % (value, counts[0], counts[1])
+            for value, counts in list(violations.items())[:5]
+        )
+
+        if len(violations) > 5:
+            details += ', ...'
+
+        raise ValueError(
+            'Join validation "%s" failed: %i key(s) would inflate the join: %s' % (
+                validate, len(violations), details
+            )
+        )
+
 
 def join(self, right_table, left_key=None, right_key=None, inner=False, full_outer=False, require_match=False,
-         columns=None):
+         columns=None, validate=None):
     """
     Create a new table by joining two table's on common values. This method
     implements most varieties of SQL join, in addition to some unique features.
@@ -70,11 +116,25 @@ def join(self, right_table, left_key=None, right_key=None, inner=False, full_out
         A sequence of column names from :code:`right_table` to include in
         the final output table. Defaults to all columns not in
         :code:`right_key`. Ignored when :code:`full_outer` is :code:`True`.
+    :param validate:
+        Declare the expected relationship between the join keys and raise a
+        :class:`ValueError` before returning an inflated table if it does
+        not hold. One of :code:`"one_to_one"`, :code:`"one_to_many"`,
+        :code:`"many_to_one"` or :code:`"many_to_many"` (the default, no
+        validation). For example, :code:`"many_to_one"` asserts that each
+        left key matches at most one right row, while duplicate keys in the
+        left table are allowed. Only keys that actually match across both
+        tables are checked; unmatched rows are still handled according to
+        the join mode. The error identifies the keys that would inflate the
+        join and their row counts on both sides.
     :returns:
         A new :class:`.Table`.
     """
     if inner and full_outer:
         raise ValueError('A join can not be both "inner" and "full_outer".')
+
+    if validate is not None and validate not in VALIDATE_OPTIONS:
+        raise ValueError('validate must be one of: %s.' % ', '.join('"%s"' % o for o in VALIDATE_OPTIONS))
 
     if right_key is None:
         right_key = left_key
@@ -118,6 +178,9 @@ def join(self, right_table, left_key=None, right_key=None, inner=False, full_out
         right_column = right_table._columns[right_key]
         right_data = right_column.values()
         right_key_indices = [right_column.index]
+
+    if validate is not None and validate != 'many_to_many':
+        _validate_join(left_data, right_data, validate)
 
     # Build names and type lists
     column_names = list(self._column_names)
