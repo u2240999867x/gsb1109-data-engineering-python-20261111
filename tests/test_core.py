@@ -346,6 +346,95 @@ def test_get_expired_slow_path(cache):
     assert cache.get(0) is None
 
 
+def test_get_many(cache):
+    assert cache.set('alpha', 1)
+    assert cache.set('beta', 2, expire=60)
+    assert cache.set('gamma', 3, expire=120)
+
+    result = cache.get_many(['alpha', 'beta', 'gamma', 'delta'])
+
+    assert result.valid == {'alpha': 1, 'beta': 2, 'gamma': 3}
+    assert result.expired == []
+    assert result.missing == ['delta']
+
+
+def test_get_many_now(cache):
+    now = time.time()
+
+    assert cache.set('alpha', 1)
+    assert cache.set('beta', 2, expire=60)
+    assert cache.set('gamma', 3, expire=120)
+
+    # All keys judged against the same specified point in time.
+
+    result = cache.get_many(['alpha', 'beta', 'gamma', 'delta'], now=now + 90)
+
+    assert result.valid == {'alpha': 1, 'gamma': 3}
+    assert result.expired == ['beta']
+    assert result.missing == ['delta']
+
+    # Expired items are not removed and plain get is unchanged.
+
+    assert cache.get('beta') == 2
+
+
+def test_get_many_expired(cache):
+    assert cache.set('alpha', 1, expire=0.001)
+    assert cache.set('beta', 2)
+    time.sleep(0.01)
+
+    result = cache.get_many(['alpha', 'beta'])
+
+    assert result.valid == {'beta': 2}
+    assert result.expired == ['alpha']
+    assert result.missing == []
+
+
+def test_get_many_key_types(cache):
+    keys = [None, 0, 1.5, 'abc', b'def', ('tuple', 1)]
+    for num, key in enumerate(keys):
+        assert cache.set(key, num)
+
+    result = cache.get_many(keys + ['dne'])
+
+    assert result.valid == {key: num for num, key in enumerate(keys)}
+    assert result.expired == []
+    assert result.missing == ['dne']
+
+
+def test_get_many_duplicates(cache):
+    assert cache.set('alpha', 1)
+
+    result = cache.get_many(['alpha', 'alpha', 'beta', 'beta'])
+
+    assert result.valid == {'alpha': 1}
+    assert result.expired == []
+    assert result.missing == ['beta']
+
+
+def test_get_many_file_value():
+    with dc.Cache(disk_min_file_size=0) as cache:
+        assert cache.set('alpha', 'a' * 100)
+        result = cache.get_many(['alpha'])
+        assert result.valid == {'alpha': 'a' * 100}
+    shutil.rmtree(cache.directory, ignore_errors=True)
+
+
+def test_get_many_ioerror(cache):
+    assert cache.set('alpha', 1)
+
+    disk = mock.Mock()
+    disk.put = mock.Mock(side_effect=[('alpha', True)])
+    disk.fetch = mock.Mock(side_effect=IOError())
+
+    with mock.patch.object(cache, '_disk', disk):
+        result = cache.get_many(['alpha'])
+
+    assert result.valid == {}
+    assert result.expired == []
+    assert result.missing == ['alpha']
+
+
 def test_pop(cache):
     assert cache.incr('alpha') == 1
     assert cache.pop('alpha') == 1

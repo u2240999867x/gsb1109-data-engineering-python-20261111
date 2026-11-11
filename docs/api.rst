@@ -23,6 +23,14 @@ Read the :ref:`FanoutCache tutorial <tutorial-fanoutcache>` for example usage.
    :special-members:
    :exclude-members: __weakref__
 
+GetManyResult
+-------------
+
+Returned by :meth:`Cache.get_many <diskcache.Cache.get_many>` and
+:meth:`FanoutCache.get_many <diskcache.fanout.FanoutCache.get_many>`.
+
+.. autoclass:: diskcache.GetManyResult
+
 DjangoCache
 -----------
 

@@ -90,6 +90,42 @@ def test_set_get_delete(cache):
     cache.check()
 
 
+def test_get_many(cache):
+    now = time.time()
+
+    for num in range(100):
+        if num % 2:
+            cache.set(num, num, expire=60)
+        else:
+            cache.set(num, num)
+
+    # All keys judged against the same specified point in time, across
+    # all shards.
+
+    result = cache.get_many(range(150), now=now + 90)
+
+    assert result.valid == {num: num for num in range(0, 100, 2)}
+    assert sorted(result.expired) == list(range(1, 100, 2))
+    assert sorted(result.missing) == list(range(100, 150))
+
+    # Expired items are not removed and plain get is unchanged.
+
+    assert cache.get(1) == 1
+
+
+def test_get_many_shard_timeout(cache):
+    shard = mock.Mock()
+    shard.get_many = mock.Mock(side_effect=dc.Timeout)
+    shards = tuple(shard for _ in range(cache._count))
+
+    with mock.patch.object(cache, '_shards', shards):
+        result = cache.get_many(range(10))
+
+    assert result.valid == {}
+    assert result.expired == []
+    assert sorted(result.missing) == list(range(10))
+
+
 def test_set_timeout(cache):
     shards = mock.Mock()
     shard = mock.Mock()

@@ -9,7 +9,7 @@ import sqlite3
 import tempfile
 import time
 
-from .core import DEFAULT_SETTINGS, ENOVAL, Cache, Disk, Timeout
+from .core import DEFAULT_SETTINGS, ENOVAL, Cache, Disk, GetManyResult, Timeout
 from .persistent import Deque, Index
 
 
@@ -285,6 +285,72 @@ class FanoutCache:
             return shard.get(key, default, read, expire_time, tag, retry)
         except (Timeout, sqlite3.OperationalError):
             return default
+
+    def get_many(self, keys, now=None, read=False, retry=False):
+        """Retrieve values for multiple `keys`, judging expiry at one time.
+
+        Keys are grouped by shard and each shard's
+        :func:`Cache.get_many <diskcache.core.Cache.get_many>` is called
+        with the same `now` timestamp, so every key in the batch is judged
+        against the same clock. The per-shard results are merged into a
+        single :class:`GetManyResult <diskcache.core.GetManyResult>` with
+        `valid`, `expired`, and `missing` groups.
+
+        The shared clock is not a cross-database transaction. Each shard
+        is a separate SQLite database read in its own transaction, so
+        concurrent writes may be visible in some shards' results and not
+        others. Within each shard the batch reads one consistent snapshot;
+        across shards only the expiry clock is unified.
+
+        If database timeout occurs then keys on the failed shard are
+        reported as missing unless `retry` is set to `True` (default
+        `False`).
+
+        Keys must be hashable. Duplicate keys are looked up once.
+
+        :param keys: iterable of keys to retrieve
+        :param float now: time used to judge expiry of all keys
+            (default None, ``time.time()`` used)
+        :param bool read: if True, return file handles to values
+            (default False)
+        :param bool retry: retry if database timeout occurs (default False)
+        :return: GetManyResult with valid, expired, and missing groups
+
+        """
+        if now is None:
+            now = time.time()
+
+        keys = list(dict.fromkeys(keys))
+        sharded = [[] for _ in range(self._count)]
+
+        for key in keys:
+            index = self._hash(key) % self._count
+            sharded[index].append(key)
+
+        valid = {}
+        expired = set()
+        missing = set()
+
+        for shard, shard_keys in zip(self._shards, sharded):
+            if not shard_keys:
+                continue
+            try:
+                result = shard.get_many(
+                    shard_keys, now=now, read=read, retry=retry
+                )
+            except (Timeout, sqlite3.OperationalError):
+                missing.update(shard_keys)
+                continue
+            valid.update(result.valid)
+            expired.update(result.expired)
+            missing.update(result.missing)
+
+        # Restore input order for the expired and missing groups.
+
+        expired = [key for key in keys if key in expired]
+        missing = [key for key in keys if key in missing]
+
+        return GetManyResult(valid, expired, missing)
 
     def __getitem__(self, key):
         """Return corresponding value for `key` from cache.

@@ -2,6 +2,7 @@
 """
 
 import codecs
+import collections as co
 import contextlib as cl
 import errno
 import functools as ft
@@ -38,6 +39,23 @@ class Constant(tuple):
 DBNAME = 'cache.db'
 ENOVAL = Constant('ENOVAL')
 UNKNOWN = Constant('UNKNOWN')
+
+
+class GetManyResult(
+    co.namedtuple('GetManyResult', 'valid expired missing')
+):
+    """Result of :func:`Cache.get_many` and :func:`FanoutCache.get_many`.
+
+    :ivar dict valid: mapping of key to value for items found and not
+        expired as of the batch's `now` time
+    :ivar list expired: keys whose items are present but expired as of
+        the batch's `now` time
+    :ivar list missing: keys with no item in the cache
+
+    """
+
+    __slots__ = ()
+
 
 MODE_NONE = 0
 MODE_RAW = 1
@@ -1220,6 +1238,102 @@ class Cache:
             return (value, db_tag)
         else:
             return value
+
+    def get_many(self, keys, now=None, read=False, retry=False):
+        """Retrieve values for multiple `keys`, judging expiry at one time.
+
+        Unlike repeated calls to :func:`Cache.get`, every key is compared
+        against the same `now` timestamp. A batch of items that straddles
+        an expiration boundary is therefore classified consistently: no
+        item is judged against an earlier or later clock than the others.
+
+        The result separates keys into three groups: `valid` maps each
+        found, unexpired key to its value; `expired` lists keys present in
+        the cache whose expire time has passed as of `now`; and `missing`
+        lists keys with no item in the cache.
+
+        All rows are read within a single transaction on the underlying
+        SQLite database, so the batch observes one consistent snapshot of
+        this cache. This guarantee covers only this Cache instance; see
+        :func:`FanoutCache.get_many <diskcache.fanout.FanoutCache.get_many>`
+        for the consistency available when keys are sharded across
+        multiple databases.
+
+        Reads are pure lookups: hit/miss statistics and eviction metadata
+        (access time and count) are not updated, and expired items are not
+        removed. Use :func:`Cache.expire` to remove expired items.
+
+        Keys must be hashable. Duplicate keys are looked up once.
+
+        Raises :exc:`Timeout` error when database timeout occurs and
+        `retry` is `False` (default).
+
+        :param keys: iterable of keys to retrieve
+        :param float now: time used to judge expiry of all keys
+            (default None, ``time.time()`` used)
+        :param bool read: if True, return file handles to values
+            (default False)
+        :param bool retry: retry if database timeout occurs (default False)
+        :return: GetManyResult with valid, expired, and missing groups
+        :raises Timeout: if database timeout occurs
+
+        """
+        if now is None:
+            now = time.time()
+
+        # De-duplicate keys while preserving order. Keys are normalized to
+        # (database key, raw) pairs which are hashable even when the
+        # original key is not a simple scalar.
+
+        keys = list(dict.fromkeys(keys))
+        key_by_pair = {}
+
+        for key in keys:
+            db_key, raw = self._disk.put(key)
+            if isinstance(db_key, sqlite3.Binary):
+                db_key = bytes(db_key)
+            key_by_pair[db_key, int(raw)] = key
+
+        pairs = list(key_by_pair)
+        valid = {}
+        expired = []
+        seen = set()
+
+        select = (
+            'SELECT key, raw, expire_time, mode, filename, value'
+            ' FROM Cache WHERE (key, raw) IN (VALUES %s)'
+        )
+
+        # Chunk pairs to stay below SQLite's bound variable limit.
+
+        with self._transact(retry) as (sql, _):
+            for offset in range(0, len(pairs), 500):
+                chunk = pairs[offset : offset + 500]  # noqa: E203
+                placeholders = ', '.join('(?, ?)' for _ in chunk)
+                args = [field for pair in chunk for field in pair]
+                rows = sql(select % placeholders, args).fetchall()
+
+                for db_key, raw, db_expire_time, mode, filename, db_value in rows:  # noqa: E501
+                    pair = (db_key, raw)
+                    key = key_by_pair[pair]
+
+                    if db_expire_time is not None and db_expire_time <= now:
+                        expired.append(key)
+                        seen.add(pair)
+                        continue
+
+                    try:
+                        value = self._disk.fetch(mode, filename, db_value, read)  # noqa: E501
+                    except IOError:
+                        # Key was deleted before we could retrieve result.
+                        continue
+
+                    valid[key] = value
+                    seen.add(pair)
+
+        missing = [key_by_pair[pair] for pair in pairs if pair not in seen]
+
+        return GetManyResult(valid, expired, missing)
 
     def __getitem__(self, key):
         """Return corresponding value for `key` from cache.
