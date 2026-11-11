@@ -170,6 +170,27 @@ loads(s[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first
 
    The other arguments have the same meaning as in `load`.
 
+find_candidates(content[, encoding[, parse_float[, parse_int[, parse_constant]]]])
+
+   Scan *content* for JSON value candidates and return them all as a list
+   of `Candidate` objects, in document order. This is meant for responses
+   that are not clean JSON, where diagnostic text or script fragments
+   surround the actual payload.
+
+   The scan is lexical: string literals and comments in the surrounding
+   noise are skipped, so a ``{`` inside a quoted diagnostic string is
+   never mistaken for a candidate. Every ``{`` or ``[`` outside of those
+   is decoded with the same lenient rules as `loads`. Candidates are
+   reported, never chosen: when several spans parse, every one of them is
+   returned so a human can decide which belongs in production.
+
+   Each `Candidate` exposes ``start`` and ``end`` character offsets into
+   *content* (``end`` is exclusive), the decoded ``value``, and
+   ``boundary_confident``. When a structure is cut off by the end of the
+   text, its lexical end cannot be confirmed; it is still reported with
+   ``boundary_confident`` set to ``False``, ``value`` set to ``None`` and
+   the decoding failure available as ``error``.
+
 Exceptions
 ----------
 

@@ -142,7 +142,7 @@ class DirtyJSONLoader(object):
             two_chars = self.content[self.pos:self.pos + 2]
             if two_chars == '//' or two_chars == '/*':
                 terminator = '\n' if two_chars == '//' else '*/'
-                lf = self.content.index(terminator, self.pos)
+                lf = self.content.find(terminator, self.pos)
                 if lf >= 0:
                     self._skip_forward_to(lf + len(terminator))
                 else:
