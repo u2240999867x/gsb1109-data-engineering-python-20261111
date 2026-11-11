@@ -70,11 +70,30 @@ class ForwardReferenceError(DaciteError):
         return f"can not resolve forward reference: {self.message}"
 
 
-class UnexpectedDataError(DaciteError):
-    def __init__(self, keys: Set[str]) -> None:
-        super().__init__()
+class UnexpectedDataError(DaciteFieldError):
+    def __init__(self, keys: Set[str], field_path: Optional[str] = None) -> None:
+        super().__init__(field_path=field_path)
         self.keys = keys
 
     def __str__(self) -> str:
-        formatted_keys = ", ".join(f'"{key}"' for key in self.keys)
-        return f"can not match {formatted_keys} to any data class field"
+        formatted_keys = ", ".join(f'"{key}"' for key in sorted(self.keys))
+        message = f"can not match {formatted_keys} to any data class field"
+        if self.field_path:
+            message = f'{message} at field "{self.field_path}"'
+        return message
+
+
+class KeyConflictError(DaciteFieldError):
+    def __init__(self, conflicts: Dict[str, Set[str]], field_path: Optional[str] = None) -> None:
+        super().__init__(field_path=field_path)
+        self.conflicts = conflicts
+
+    def __str__(self) -> str:
+        formatted_conflicts = ", ".join(
+            f'"{key}" matches fields: {", ".join(sorted(field_names))}'
+            for key, field_names in sorted(self.conflicts.items())
+        )
+        message = f"can not choose a data class field for conflicting input keys: {formatted_conflicts}"
+        if self.field_path:
+            message = f'{message} at field "{self.field_path}"'
+        return message

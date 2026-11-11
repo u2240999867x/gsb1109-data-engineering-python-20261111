@@ -10,6 +10,7 @@ from dacite.exceptions import (
     StrictUnionMatchError,
     ForwardReferenceError,
     UnexpectedDataError,
+    KeyConflictError,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "StrictUnionMatchError",
     "ForwardReferenceError",
     "UnexpectedDataError",
+    "KeyConflictError",
 ]

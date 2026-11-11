@@ -1,6 +1,7 @@
+from collections import defaultdict
 from dataclasses import is_dataclass
 from itertools import zip_longest
-from typing import TypeVar, Type, Optional, Mapping, Any, Collection, MutableMapping
+from typing import TypeVar, Type, Optional, Mapping, Any, Collection, MutableMapping, Dict, Set
 
 from dacite.cache import cache
 from dacite.config import Config
@@ -19,6 +20,7 @@ from dacite.exceptions import (
     DaciteFieldError,
     UnexpectedDataError,
     StrictUnionMatchError,
+    KeyConflictError,
 )
 from dacite.types import (
     is_instance,
@@ -56,9 +58,7 @@ def from_dict(data_class: Type[T], data: Data, config: Optional[Config] = None) 
     data_class_fields = cache(get_fields)(data_class)
 
     if config.strict:
-        extra_fields = set(data.keys()) - {f.name for f in data_class_fields}
-        if extra_fields:
-            raise UnexpectedDataError(keys=extra_fields)
+        _check_strict_data(data=data, fields=data_class_fields, config=config)
 
     for field in data_class_fields:
         field_type = data_class_hints[field.name]
@@ -90,6 +90,26 @@ def from_dict(data_class: Type[T], data: Data, config: Optional[Config] = None) 
         setattr(instance, key, value)
 
     return instance
+
+
+def _check_strict_data(data: Data, fields: Collection, config: Config) -> None:
+    key_to_fields: MutableMapping[Any, Set[str]] = defaultdict(set)
+    for field in fields:
+        key_to_fields[config.convert_key(field.name)].add(field.name)
+
+    conflicts: Dict[Any, Set[str]] = {}
+    unexpected_keys: Set[Any] = set()
+    for original_key in data.keys():
+        matching_fields = key_to_fields.get(original_key)
+        if matching_fields is None:
+            unexpected_keys.add(original_key)
+        elif len(matching_fields) > 1:
+            conflicts[original_key] = set(matching_fields)
+
+    if conflicts:
+        raise KeyConflictError(conflicts=conflicts)
+    if unexpected_keys:
+        raise UnexpectedDataError(keys=unexpected_keys)
 
 
 def _build_value(type_: Type, data: Any, config: Config) -> Any:

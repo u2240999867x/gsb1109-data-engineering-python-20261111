@@ -399,7 +399,21 @@ from_dict(A, {'x': 4}, config=Config(check_types=False))
 By default `from_dict` ignores additional keys (not matching data class field) 
 in the input data. If you want change this behaviour set `Config.strict` to 
 `True`. In case of unexpected key `from_dict` will raise `UnexpectedDataError` 
-exception.
+exception. The check is recursive, so an unexpected key inside a nested data 
+class is reported as well with the `field_path` pointing at its location 
+(e.g. `"address.street"`).
+
+When `Config.convert_key` is enabled, two data class fields can end up mapped 
+to the same input key. In strict mode such an input key raises 
+`KeyConflictError`, which lists the original key together with every field it 
+could be assigned to, instead of silently dropping one of the values.
+
+A field typed as a mapping (e.g. `Dict[str, Any]`) is not treated as a data 
+class: it keeps every business key it receives, so those keys are never 
+reported as unexpected. If the mapping values are themselves data classes, 
+their fields are still checked recursively.
+
+On failure the input dictionary is never mutated.
 
 ### Strict unions match
 
@@ -448,6 +462,8 @@ of `Union`
 dataclass
 - `UnexpectedDataError` - raised when `strict` mode is enabled and the input 
 data has not matching keys
+- `KeyConflictError` - raised when `strict` mode together with `convert_key` 
+maps a single input key to more than one data class field
 - `StrictUnionMatchError` - raised when `strict_unions_match` mode is enabled 
 and the input data has ambiguous `Union` match
 

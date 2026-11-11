@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-...
+### Added
+
+- Strict mode now reports unexpected keys in nested data classes, with
+  `UnexpectedDataError.field_path` pointing at their location
+- Add `KeyConflictError`, raised in strict mode when `convert_key` maps a
+  single input key to more than one data class field
+
+### Fixed
+
+- Fields typed as mappings (e.g. `Dict[str, Any]`) keep their business keys in
+  strict mode instead of being treated as data class fields
+- `UnexpectedDataError` now formats its keys deterministically
 
 ## [1.9.2] - 2025-02-05
 
