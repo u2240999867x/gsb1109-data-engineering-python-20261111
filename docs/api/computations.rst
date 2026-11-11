@@ -9,6 +9,7 @@ Computations
     :nosignatures:
 
     agate.Computation
+    agate.FiscalDimension
     agate.Formula
 
 Mathematical computations
@@ -28,6 +29,7 @@ Detailed list
 
 .. autoclass:: agate.Change
 .. autoclass:: agate.Computation
+.. autoclass:: agate.FiscalDimension
 .. autoclass:: agate.Formula
 .. autoclass:: agate.Percent
 .. autoclass:: agate.PercentChange

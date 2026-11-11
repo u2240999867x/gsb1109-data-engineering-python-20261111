@@ -13,6 +13,7 @@ class by inheriting from :class:`Computation`.
 
 from agate.computations.base import Computation
 from agate.computations.change import Change
+from agate.computations.fiscal_dimension import FiscalDimension
 from agate.computations.formula import Formula
 from agate.computations.percent import Percent
 from agate.computations.percent_change import PercentChange

@@ -1,6 +1,7 @@
 1.14.3 - Unreleased
 -------------------
 
+- feat: :class:`.FiscalCalendar` maps dates onto a 4-4-5 style fiscal calendar, with configurable fiscal year start rule, weeks per quarter and 53rd week placement, and can generate a complete fiscal period list. :class:`.FiscalDimension` computes fiscal year, quarter, period and week-in-period columns from :class:`.Date` or :class:`.DateTime` columns.
 - feat: :class:`.Median`, :class:`.Percentiles`, :class:`.Quartiles`, :class:`.Quintiles`, :class:`.Deciles` and :class:`.IQR` can be applied to :class:`.TimeDelta` columns, like :class:`.Sum` and :class:`.Mean`.
 - fix: :meth:`.Table.distinct` now deduplicates rows when ``key`` is a sequence of column names.
 - fix: :class:`.Rank` ranks null values last when ``reverse=True``.

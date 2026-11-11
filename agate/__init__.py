@@ -5,6 +5,7 @@ from agate.computations import *
 from agate.config import get_option, set_option, set_options
 from agate.data_types import *
 from agate.exceptions import *
+from agate.fiscal import FiscalCalendar, FiscalDate, FiscalPeriod
 # import agate.fixed as fixed
 from agate.mapped_sequence import MappedSequence
 from agate.rows import Row
