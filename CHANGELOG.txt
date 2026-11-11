@@ -1,6 +1,8 @@
 === UNRELEASED
 
 * Fixed `$` in `patternProperties` matching before a trailing newline, which also made a `pattern` with the same regex accept a trailing newline
+* Added call-level `ref_policy` (`RefPolicy`) for `compile`, `compile_to_code` and `validate` controlling retrieval of remote `$ref` references: allowed target URIs, redirects, response size and resource identity; the default policy denies all remote references so untrusted schemas cannot make compilation reach arbitrary addresses
+* Added `RefPolicyDenied`, `RefFetchError` and `RefContentConflict` exceptions (subclasses of `JsonSchemaDefinitionException`) with machine-readable `reason`, and provenance records of remote reference retrievals (`RefResolver.retrieval_log`, `__ref_retrievals__` on compiled validators)
 
 === 2.22.3 (2026-11-01)
 

@@ -73,3 +73,53 @@ class JsonSchemaDefinitionException(JsonSchemaException):
     """
     Exception raised by generator of validation function.
     """
+
+
+class RefRetrievalException(JsonSchemaDefinitionException):
+    """
+    Base exception for problems while resolving a remote ``$ref``.
+
+    Every subclass exposes the affected ``uri`` and a machine-readable
+    ``reason`` so callers can tell a policy rejection apart from a network
+    failure or a content conflict without parsing error messages.
+    """
+
+    def __init__(self, message: str, *, uri: str, reason: str, **details: Any) -> None:
+        super().__init__(message)
+        self.message = message
+        self.uri = uri
+        self.reason = reason
+        for name, value in details.items():
+            setattr(self, name, value)
+
+
+class RefPolicyDenied(RefRetrievalException):
+    """
+    A remote reference was rejected by the call-level ``RefPolicy``.
+
+    Possible reasons include ``scheme_not_allowed``, ``uri_not_allowed``,
+    ``redirect_not_allowed``, ``too_many_redirects``,
+    ``response_too_large``, ``resource_id_not_allowed`` and
+    ``resource_id_mismatch``.
+    """
+
+
+class RefFetchError(RefRetrievalException):
+    """
+    A reference allowed by the policy could not be retrieved or decoded.
+
+    Typical reasons are ``network_error``, ``invalid_json``,
+    ``handler_error`` and ``fetch_failed``. The original exception is
+    preserved as ``__cause__``.
+    """
+
+
+class RefContentConflict(RefRetrievalException):
+    """
+    The same URI was resolved to documents with different content.
+
+    Raised with reason ``content_conflict`` when a URI is fetched again and
+    the new document differs from the one previously retrieved, or with
+    reason ``resource_id_conflict`` when a document claims an identity
+    (``$id``/``id``) already bound to a different document.
+    """

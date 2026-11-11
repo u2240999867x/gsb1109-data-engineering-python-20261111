@@ -118,6 +118,16 @@ from .exceptions import (
     JsonSchemaValueException,
     JsonSchemaValuesException,
     JsonSchemaDefinitionException,
+    RefContentConflict,
+    RefFetchError,
+    RefPolicyDenied,
+    RefRetrievalException,
+)
+from .ref_policy import (
+    FetchedResource,
+    RefPolicy,
+    RefRetrievalRecord,
+    allow_uri_prefix,
 )
 from .ref_resolver import RefResolver
 from .version import VERSION
@@ -128,6 +138,14 @@ __all__ = (
     'JsonSchemaValueException',
     'JsonSchemaValuesException',
     'JsonSchemaDefinitionException',
+    'RefContentConflict',
+    'RefFetchError',
+    'RefPolicy',
+    'RefPolicyDenied',
+    'RefRetrievalException',
+    'RefRetrievalRecord',
+    'FetchedResource',
+    'allow_uri_prefix',
     'validate',
     'compile',
     'compile_to_code',
@@ -149,6 +167,7 @@ def validate(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    ref_policy: RefPolicy | None = None,
 ) -> Any:
     """
     Validation function for lazy programmers or for use cases when you need
@@ -165,11 +184,13 @@ def validate(
 
     Preferred is to use :any:`compile` function.
 
-    The ``handlers`` parameter controls resolution of remote ``$ref`` URIs; see
-    :any:`compile` for details and security considerations when schemas are not
-    fully trusted.
+    The ``handlers`` and ``ref_policy`` parameters control resolution of
+    remote ``$ref`` URIs; see :any:`compile` for details and security
+    considerations when schemas are not fully trusted.
     """
-    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail)(data)
+    return compile(
+        definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail, ref_policy,
+    )(data)
 
 
 #TODO: Change use_default to False when upgrading to version 3.
@@ -182,6 +203,7 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    ref_policy: RefPolicy | None = None,
 ) -> Validator:
     """
     Generates validation function for validating JSON schema passed in ``definition``.
@@ -228,12 +250,38 @@ def compile(
 
     .. warning::
 
-        Do not compile or validate untrusted schemas without custom
-        ``handlers``. A schema containing ``$ref`` can trigger outbound HTTP
-        requests to arbitrary URLs, including internal or loopback addresses
-        (server-side request forgery). Provide ``handlers`` to restrict which
-        URIs are resolved, or pre-resolve references before passing the schema
-        to this library.
+        Do not compile or validate untrusted schemas without restricting
+        remote references. A schema containing ``$ref`` can trigger outbound
+        HTTP requests to arbitrary URLs, including internal or loopback
+        addresses (server-side request forgery). Pass ``ref_policy`` to
+        restrict which URIs are resolved, or pre-resolve references before
+        passing the schema to this library.
+
+    The ``ref_policy`` parameter accepts a call-level :any:`RefPolicy`
+    deciding, for this compilation only, which remote references may be
+    retrieved and how: allowed target URIs, redirect handling, maximum
+    response size and the resource identity (``$id``/``id``) a fetched
+    document may claim. The default policy denies every remote reference,
+    so a schema coming from an external party cannot make the compilation
+    process reach an address it names. No global network function is
+    modified; compilations without a policy keep their previous behavior,
+    and purely local schemas never trigger the policy.
+
+    .. code-block:: python
+
+        policy = fastjsonschema.RefPolicy(
+            allowed_uri=fastjsonschema.allow_uri_prefix('https://schemas.example.com/'),
+            max_response_bytes=1024 * 1024,
+        )
+        validate = fastjsonschema.compile(definition, ref_policy=policy)
+
+    Policy violations raise :any:`RefPolicyDenied`, retrieval problems
+    :any:`RefFetchError`, and the same URI resolving to different content
+    :any:`RefContentConflict` (all subclasses of
+    :any:`JsonSchemaDefinitionException`, each carrying a machine-readable
+    ``reason``). Every retrieval attempt is recorded as
+    :any:`RefRetrievalRecord`; the records of a compiled validator are
+    available as its ``__ref_retrievals__`` attribute.
 
     .. code-block:: python
 
@@ -288,11 +336,14 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        ref_policy,
     )
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
     exec(code_generator.func_code, global_state)
     func = global_state[resolver.get_scope_name()]
+    # Provenance of remote references retrieved while compiling.
+    func.__ref_retrievals__ = resolver.retrieval_log
     if formats:
         return update_wrapper(partial(func, custom_formats=formats), func)
     return func
@@ -307,6 +358,7 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    ref_policy: RefPolicy | None = None,
 ) -> str:
     """
     Generates validation code for validating JSON schema passed in ``definition``.
@@ -331,7 +383,7 @@ def compile_to_code(
     code fails (bad definition).
 
     Remote ``$ref`` URIs are resolved the same way as in :any:`compile`; see its
-    documentation for ``handlers`` and security considerations.
+    documentation for ``handlers``, ``ref_policy`` and security considerations.
     """
     _, code_generator = _factory(
         definition,
@@ -341,6 +393,7 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        ref_policy,
     )
     return (
         'VERSION = "' + VERSION + '"\n' +
@@ -357,8 +410,9 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    ref_policy: RefPolicy | None = None,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
-    resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
+    resolver = RefResolver.from_schema(definition, handlers=handlers, store={}, ref_policy=ref_policy)
     code_generator = _get_code_generator_class(definition)(
         definition,
         resolver=resolver,
