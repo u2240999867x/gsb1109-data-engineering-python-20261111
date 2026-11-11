@@ -2507,6 +2507,112 @@ class Glommer:
     def glom(self, target, spec, **kwargs):
         return glom(target, spec, scope=self.scope, **kwargs)
 
+    def compile(self, spec):
+        """Prepare *spec* for repeated evaluation against many targets,
+        returning a :class:`CompiledSpec`.
+
+        >>> glommer = Glommer()
+        >>> compiled = glommer.compile('a.b')
+        >>> [compiled.glom({'a': {'b': i}}) for i in range(3)]
+        [0, 1, 2]
+
+        The returned object shares this Glommer's type registry: types
+        registered with :meth:`~Glommer.register` after compilation
+        still affect the prepared spec, while registrations on other
+        :class:`Glommer` instances (or the module-level registry) do
+        not. See :class:`CompiledSpec` for details.
+        """
+        return CompiledSpec(spec, self.scope)
+
+
+def _prepare_spec(spec):
+    """Validate and pre-process a spec for compilation. String specs
+    are parsed into :class:`Path` objects up front; all other valid
+    specs are stored as-is.
+    """
+    if type(spec) is str:
+        return Path.from_text(spec)
+    if (type(spec) is TType
+            or _has_callable_glomit(spec)
+            or isinstance(spec, (dict, list, tuple, basestring))
+            or callable(spec)):
+        return spec
+    raise BadSpec('expected spec to be dict, list, tuple, callable, string,'
+                  ' or other Spec-like type, not: %r' % (spec,))
+
+
+class CompiledSpec:
+    """A prepared glom spec, ready for repeated evaluation against many
+    targets of the same structure. Create one with :func:`compile` or
+    :meth:`Glommer.compile`:
+
+    >>> compiled = compile({'name': 'name', 'first_tag': T['tags'][0]})
+    >>> compiled.glom({'name': 'item', 'tags': ['a', 'b']})
+    {'name': 'item', 'first_tag': 'a'}
+
+    Reusable preparation work, like parsing string paths and
+    validating the spec, happens once, at compile time. Each call to
+    :meth:`~CompiledSpec.glom` evaluates the spec with a fresh scope,
+    exactly like calling :func:`~glom.glom`: no target values, ``S``
+    assignments, or other temporary bindings are cached or carried
+    over between runs.
+
+    .. note::
+
+       A CompiledSpec shares the target type registry of its source.
+       Types registered *after* compilation still affect previously
+       created CompiledSpec objects from the same source:
+       :func:`~glom.register` affects objects from :func:`~glom.compile`,
+       and ``glommer.register()`` affects objects from
+       ``glommer.compile()``. Registrations made on other
+       :class:`Glommer` instances have no effect.
+
+    Args:
+       spec (object): The glom spec to prepare.
+       scope (dict): The base scope providing evaluation context
+          (notably the target type registry). Generally obtained from
+          a :class:`Glommer` instance or the module default scope.
+
+    """
+    def __init__(self, spec, scope):
+        self.spec = _prepare_spec(spec)
+        self.scope = scope
+
+    def glom(self, target, **kwargs):
+        """Evaluate the prepared spec against *target*.
+
+        Accepts the same keyword arguments as :func:`~glom.glom`,
+        including *default*, *skip_exc*, and *scope* for additional
+        per-run scope entries. Per-run keyword arguments apply only to
+        that call and are never stored on the CompiledSpec.
+        """
+        local_scope = kwargs.pop('scope', None)
+        scope = dict(self.scope)
+        if local_scope:
+            scope.update(local_scope)
+        return glom(target, self.spec, scope=scope, **kwargs)
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}({bbrepr(self.spec)})'
+
+
+def compile(spec):
+    """Prepare *spec* for repeated evaluation against many targets,
+    returning a :class:`CompiledSpec`. Useful when running one spec
+    over many targets of the same structure:
+
+    >>> compiled = compile(T['a']['b'])
+    >>> compiled.glom({'a': {'b': 1}})
+    1
+
+    The prepared spec uses the module-default scope and type registry,
+    so types registered with :func:`register` (or ops with
+    :func:`register_op`) after compilation still affect the returned
+    object. For a prepared spec with an isolated registry, use
+    :meth:`Glommer.compile` instead.
+    """
+    return CompiledSpec(spec, _DEFAULT_SCOPE)
+
 
 class Fill:
     """A specifier type which switches to glom into "fill-mode". For the

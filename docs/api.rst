@@ -39,6 +39,16 @@ function, :func:`~glom.glom`.
 
 .. autofunction:: glom.glom
 
+Prepared Specs
+--------------
+
+When running one spec over many targets of the same structure, a
+spec can be prepared once and evaluated repeatedly.
+
+.. autofunction:: glom.compile
+.. autoclass:: glom.CompiledSpec
+   :members: glom
+
 Basic Specifiers
 ----------------
 

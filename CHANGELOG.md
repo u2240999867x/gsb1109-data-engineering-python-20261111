@@ -12,6 +12,16 @@ The glom team's approach to updates can be summed up as:
 Check this page when upgrading, we strive to keep the updates
 summarized and well-linked.
 
+## 26.11.0
+
+_(November 11, 2026)_
+
+- Add `glom.compile()` and `Glommer.compile()`, returning a reusable
+  `CompiledSpec` for efficiently running one spec over many targets.
+  Each run evaluates with a fresh scope (no cached values or temporary
+  bindings), and prepared specs share the type registry of their
+  source, so later registrations on that same source still apply.
+
 ## 25.12.0
 
 _(December 28, 2025)_

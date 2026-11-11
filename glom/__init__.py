@@ -1,4 +1,6 @@
 from glom.core import (glom,
+                       compile,
+                       CompiledSpec,
                        Fill,
                        Auto,
                        register,
