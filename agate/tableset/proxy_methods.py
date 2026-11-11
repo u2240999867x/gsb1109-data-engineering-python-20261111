@@ -54,6 +54,13 @@ def homogenize(self, *args, **kwargs):
     return self._proxy('homogenize', *args, **kwargs)
 
 
+def homogenize_calendar(self, *args, **kwargs):
+    """
+    Calls :meth:`.Table.homogenize_calendar` on each table in the TableSet.
+    """
+    return self._proxy('homogenize_calendar', *args, **kwargs)
+
+
 def join(self, *args, **kwargs):
     """
     Calls :meth:`.Table.join` on each table in the TableSet.

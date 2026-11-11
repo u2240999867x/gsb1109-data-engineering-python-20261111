@@ -314,6 +314,7 @@ from agate.table.from_json import from_json
 from agate.table.from_object import from_object
 from agate.table.group_by import group_by
 from agate.table.homogenize import homogenize
+from agate.table.homogenize_calendar import homogenize_calendar
 from agate.table.join import join
 from agate.table.limit import limit
 from agate.table.line_chart import line_chart
@@ -347,6 +348,7 @@ Table.from_json = from_json
 Table.from_object = from_object
 Table.group_by = group_by
 Table.homogenize = homogenize
+Table.homogenize_calendar = homogenize_calendar
 Table.join = join
 Table.limit = limit
 Table.line_chart = line_chart

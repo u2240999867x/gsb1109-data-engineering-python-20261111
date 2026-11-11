@@ -82,6 +82,7 @@ Table Proxy Methods
     agate.TableSet.find
     agate.TableSet.group_by
     agate.TableSet.homogenize
+    agate.TableSet.homogenize_calendar
     agate.TableSet.join
     agate.TableSet.limit
     agate.TableSet.normalize

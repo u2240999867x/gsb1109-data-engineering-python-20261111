@@ -75,6 +75,7 @@ Advanced processing
     agate.Table.denormalize
     agate.Table.group_by
     agate.Table.homogenize
+    agate.Table.homogenize_calendar
     agate.Table.join
     agate.Table.merge
     agate.Table.normalize

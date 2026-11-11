@@ -166,7 +166,7 @@ from agate.tableset.line_chart import line_chart
 from agate.tableset.merge import merge
 from agate.tableset.print_structure import print_structure
 from agate.tableset.proxy_methods import (bins, compute, denormalize, distinct, exclude, find, group_by, homogenize,
-                                          join, limit, normalize, order_by, pivot, select, where)
+                                          homogenize_calendar, join, limit, normalize, order_by, pivot, select, where)
 from agate.tableset.scatterplot import scatterplot
 from agate.tableset.to_csv import to_csv
 from agate.tableset.to_json import to_json
@@ -185,6 +185,7 @@ TableSet.from_json = from_json
 TableSet.group_by = group_by
 TableSet.having = having
 TableSet.homogenize = homogenize
+TableSet.homogenize_calendar = homogenize_calendar
 TableSet.join = join
 TableSet.limit = limit
 TableSet.line_chart = line_chart
