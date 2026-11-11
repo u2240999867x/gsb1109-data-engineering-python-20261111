@@ -91,6 +91,43 @@ table. Read the comment with ``trivia.comment`` and update it with ``comment()``
     [database]
     enabled = false # Updated database comment
 
+Updating numbers while keeping their style
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Assigning a plain Python number replaces the whole item, so formatting such
+as a hexadecimal prefix or digit-grouping underscores is lost::
+
+    >>> from tomlkit import parse
+    >>> doc = parse("max_connections = 0x00_FF\n")
+    >>> doc["max_connections"] = 4096
+    >>> print(dumps(doc), end="")
+    max_connections = 4096
+
+``Integer.with_value()`` and ``Float.with_value()`` instead return a new item
+that keeps the original base (decimal, binary, octal or hexadecimal) and
+underscore grouping, along with the item's comments. Assign the returned item
+back to keep the style on disk::
+
+    >>> from tomlkit.items import StylePolicy
+    >>> doc = parse("max_connections = 0x00_FF  # raised after the audit\n")
+    >>> doc["max_connections"] = doc.item("max_connections").with_value(4096)
+    >>> print(dumps(doc), end="")
+    max_connections = 0x10_00  # raised after the audit
+
+When the new value cannot be expressed in the original style (for example a
+negative number in hexadecimal, which TOML does not allow), the strict default
+``StylePolicy.RAISE`` raises
+:class:`~tomlkit.exceptions.StylePreservationError`. Pass
+``StylePolicy.FALLBACK`` to render the value with the ordinary representation
+instead; values are never truncated or rounded to force the old style::
+
+    >>> item = doc.item("max_connections")
+    >>> item.with_value(-1, StylePolicy.FALLBACK).as_string()
+    '-1'
+
+Date, time and datetime items are not numbers and do not provide
+``with_value()``; keep using their ``replace()`` method.
+
 Writing
 -------
 

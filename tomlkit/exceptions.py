@@ -232,3 +232,10 @@ class ConvertError(TypeError, ValueError, TOMLKitError):
     It should be a TypeError, but due to historical reasons
     it needs to subclass ValueError as well.
     """
+
+
+class StylePreservationError(ValueError, TOMLKitError):
+    """Raised when a numeric value cannot be represented in the item's
+    original number style (base and digit grouping) and the strict
+    :class:`~tomlkit.items.StylePolicy` is in effect.
+    """

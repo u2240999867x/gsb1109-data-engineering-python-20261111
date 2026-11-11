@@ -15,19 +15,23 @@ from datetime import timedelta
 from datetime import timezone
 from datetime import tzinfo
 from typing import Any
+from typing import cast
 
 import pytest
 
 from tests.util import assert_is_ppo
 from tests.util import elementary_test
 from tomlkit import api
+from tomlkit import dumps
 from tomlkit import parse
 from tomlkit.container import OutOfOrderTableProxy
 from tomlkit.exceptions import NonExistentKey
+from tomlkit.exceptions import StylePreservationError
 from tomlkit.items import Array
 from tomlkit.items import Bool
 from tomlkit.items import Comment
 from tomlkit.items import DateTime
+from tomlkit.items import Float
 from tomlkit.items import InlineTable
 from tomlkit.items import Integer
 from tomlkit.items import Item
@@ -36,6 +40,7 @@ from tomlkit.items import Null
 from tomlkit.items import SingleKey as Key
 from tomlkit.items import String
 from tomlkit.items import StringType
+from tomlkit.items import StylePolicy
 from tomlkit.items import Table
 from tomlkit.items import Time
 from tomlkit.items import Trivia
@@ -387,6 +392,146 @@ def test_hex_octal_and_bin_integers_are_supported(
     assert doc["oct2"] == 493
 
     assert doc["bin1"] == 214
+
+
+@pytest.mark.parametrize(
+    "raw,new_value,expected",
+    [
+        ("0x00_FF", 0x1000, "0x10_00"),
+        ("0xDEADBEEF", 255, "0xff"),
+        ("0o755", 493, "0o755"),
+        ("0o755", 4096, "0o10000"),
+        ("0b1101_0110", 300, "0b1_0010_1100"),
+        ("1_000", 4096, "4_096"),
+        ("1_000", 7, "7"),
+        ("42", 7, "7"),
+        ("+42", 7, "+7"),
+        ("-42", 1, "1"),
+        ("-42", -5, "-5"),
+        ("0", 0, "0"),
+    ],
+)
+def test_integer_with_value_keeps_base_and_grouping(
+    raw: str, new_value: int, expected: str
+) -> None:
+    source = cast(Integer, parse(f"k = {raw}\n").item("k"))
+
+    updated = source.with_value(new_value)
+
+    assert isinstance(updated, Integer)
+    assert updated == new_value
+    assert updated.unwrap() == new_value
+    assert updated.as_string() == expected
+    # The output stays valid TOML parsing back to the same value.
+    assert parse(f"k = {expected}\n")["k"] == new_value
+    # The original item is left untouched.
+    assert source.as_string() == raw
+
+
+@pytest.mark.parametrize("raw", ["0x00_FF", "0o755", "0b1101_0110"])
+def test_integer_with_value_negative_non_decimal_follows_policy(raw: str) -> None:
+    source = cast(Integer, parse(f"k = {raw}\n").item("k"))
+
+    with pytest.raises(StylePreservationError):
+        source.with_value(-1)
+
+    updated = source.with_value(-1, StylePolicy.FALLBACK)
+    assert updated.as_string() == "-1"
+    assert parse(f"k = {updated.as_string()}\n")["k"] == -1
+
+
+def test_integer_with_value_rejects_fractional_float() -> None:
+    source = cast(Integer, parse("k = 0x00_FF\n").item("k"))
+
+    with pytest.raises(ValueError):
+        source.with_value(3.5)
+
+    # Integral floats are accepted without truncation.
+    assert source.with_value(3.0).as_string() == "0x3"
+
+
+@pytest.mark.parametrize(
+    "raw,new_value,expected",
+    [
+        ("6_000.00_05", 123456.789, "123_456.78_9"),
+        ("1.2e3", 1e-7, "1e-7"),
+        ("5e-2", 1e20, "1e+20"),
+        ("1.0e-3", 2.5e-5, "2.5e-5"),
+        ("1.0", 2.5, "2.5"),
+        ("+1.5", 2.5, "+2.5"),
+        ("-2.25", 1.0, "1.0"),
+        ("-0.0", 1.0, "1.0"),
+        ("inf", 1.5, "1.5"),
+        ("1.0", float("inf"), "inf"),
+        ("+inf", float("inf"), "+inf"),
+        ("nan", float("nan"), "nan"),
+    ],
+)
+def test_float_with_value_keeps_notation_and_grouping(
+    raw: str, new_value: float, expected: str
+) -> None:
+    source = cast(Float, parse(f"k = {raw}\n").item("k"))
+
+    updated = source.with_value(new_value)
+
+    assert isinstance(updated, Float)
+    assert updated.as_string() == expected
+    reparsed = parse(f"k = {expected}\n")["k"]
+    if math.isnan(new_value):
+        assert math.isnan(reparsed)
+    else:
+        assert reparsed == new_value
+    assert source.as_string() == raw
+
+
+@pytest.mark.parametrize(
+    "raw,new_value,fallback",
+    [
+        ("1.2e3", 1.0, "1.0"),
+        ("1.5", 1e20, "1e+20"),
+    ],
+)
+def test_float_with_value_notation_mismatch_follows_policy(
+    raw: str, new_value: float, fallback: str
+) -> None:
+    source = cast(Float, parse(f"k = {raw}\n").item("k"))
+
+    with pytest.raises(StylePreservationError):
+        source.with_value(new_value)
+
+    updated = source.with_value(new_value, StylePolicy.FALLBACK)
+    assert updated.as_string() == fallback
+    assert parse(f"k = {fallback}\n")["k"] == new_value
+
+
+def test_with_value_copies_trivia_and_preserves_comment() -> None:
+    doc = parse("max_conn = 0x00_FF  # concurrency limit\n")
+    source = cast(Integer, doc.item("max_conn"))
+
+    updated = source.with_value(4096)
+    assert updated.trivia is not source.trivia
+    assert updated.trivia.comment == "# concurrency limit"
+
+    doc["max_conn"] = updated
+
+    assert dumps(doc) == "max_conn = 0x10_00  # concurrency limit\n"
+    # Mutating the result's trivia must not touch the original item.
+    updated.comment("# rewritten")
+    assert source.trivia.comment == "# concurrency limit"
+
+
+def test_with_value_default_policy_is_strict() -> None:
+    source = cast(Integer, parse("k = 0x00_FF\n").item("k"))
+
+    with pytest.raises(StylePreservationError):
+        source.with_value(-1)
+
+
+def test_date_time_items_have_no_numeric_with_value() -> None:
+    doc = parse("d = 1979-05-27\nt = 07:32:00\ndt = 1979-05-27T07:32:00Z\n")
+
+    for key in ("d", "t", "dt"):
+        assert not hasattr(doc.item(key), "with_value")
 
 
 def test_key_automatically_sets_proper_string_type_if_not_bare() -> None:

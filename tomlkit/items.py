@@ -4,6 +4,7 @@ import abc
 import copy
 import dataclasses
 import inspect
+import math
 import re
 import string
 
@@ -19,7 +20,9 @@ from datetime import tzinfo
 from enum import Enum
 from typing import TYPE_CHECKING
 from typing import Any
+from typing import SupportsFloat
 from typing import SupportsIndex
+from typing import SupportsInt
 from typing import TypeVar
 from typing import overload
 
@@ -34,6 +37,7 @@ from tomlkit._utils import escape_string
 from tomlkit._utils import validate_comment
 from tomlkit.exceptions import ConvertError
 from tomlkit.exceptions import InvalidStringError
+from tomlkit.exceptions import StylePreservationError
 
 
 if TYPE_CHECKING:
@@ -678,6 +682,125 @@ class Comment(Item):
         return f"{self._trivia.indent}{decode(self._trivia.comment)}"
 
 
+class StylePolicy(Enum):
+    """Policy followed by :meth:`Integer.with_value` and
+    :meth:`Float.with_value` when the new value cannot be expressed in the
+    item's original number style (base and digit grouping).
+
+    ``RAISE`` raises :class:`~tomlkit.exceptions.StylePreservationError`;
+    ``FALLBACK`` renders the value with the ordinary representation instead.
+    The value is never truncated or rounded to force the old style.
+    """
+
+    RAISE = "raise"
+    FALLBACK = "fallback"
+
+
+_INTEGER_PREFIXES = (("0b", 2), ("0o", 8), ("0x", 16))
+_INTEGER_FORMAT_SPEC = {2: "b", 8: "o", 16: "x"}
+
+
+def _split_number_sign(raw: str) -> tuple[str, str]:
+    if raw[:1] in ("+", "-"):
+        return raw[0], raw[1:]
+    return "", raw
+
+
+def _integer_base(body: str) -> int:
+    for prefix, base in _INTEGER_PREFIXES:
+        if body.startswith(prefix):
+            return base
+    return 10
+
+
+def _integral_value(value: SupportsInt) -> int:
+    """Coerce ``value`` to an int, refusing floats with a fractional part
+    instead of truncating them."""
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"Non-integral value cannot update an integer: {value!r}")
+    return int(value)
+
+
+def _group_size(digit_part: str) -> int:
+    """The effective grouping convention: width of the last underscore-delimited
+    group, or 0 when the literal has no grouping."""
+    groups = digit_part.split("_")
+    if len(groups) < 2:
+        return 0
+    return len(groups[-1])
+
+
+def _group_digits(digits: str, group_size: int) -> str:
+    if group_size <= 0 or len(digits) <= group_size:
+        return digits
+    head_length = len(digits) % group_size or group_size
+    groups = [digits[:head_length]]
+    groups.extend(
+        digits[start : start + group_size]
+        for start in range(head_length, len(digits), group_size)
+    )
+    return "_".join(groups)
+
+
+def _group_fraction(digits: str, group_size: int) -> str:
+    if group_size <= 0 or len(digits) <= group_size:
+        return digits
+    groups = [
+        digits[start : start + group_size]
+        for start in range(0, len(digits), group_size)
+    ]
+    return "_".join(groups)
+
+
+def _render_float_like(body: str, new_value: float) -> tuple[str, str | None]:
+    """Format ``new_value`` (finite) following ``body``'s notation and
+    grouping. Returns ``(rendered, None)`` or ``("", reason)`` when the
+    original notation cannot be kept."""
+    text = repr(new_value)
+    value_sign = ""
+    if text.startswith("-"):
+        value_sign, text = "-", text[1:]
+
+    if "e" in text:
+        mantissa, exponent = text.split("e", 1)
+        scientific = True
+    else:
+        mantissa, exponent = text, ""
+        scientific = False
+
+    if "." in mantissa:
+        int_part, frac_part = mantissa.split(".", 1)
+    else:
+        int_part, frac_part = mantissa, ""
+
+    source = body.split("e", 1)[0] if "e" in body else body
+    if "." in source:
+        src_int, src_frac = source.split(".", 1)
+    else:
+        src_int, src_frac = source, ""
+
+    rendered = _group_digits(int_part, _group_size(src_int))
+    if frac_part:
+        rendered = f"{rendered}.{_group_fraction(frac_part, _group_size(src_frac))}"
+
+    if scientific:
+        if "e" not in body:
+            return (
+                "",
+                "the new value's shortest round-trip representation uses "
+                "exponent notation",
+            )
+        exp = int(exponent)
+        rendered = f"{rendered}e{'+' if exp >= 0 else '-'}{abs(exp)}"
+    elif "e" in body:
+        return (
+            "",
+            "the new value's shortest round-trip representation has no exponent",
+        )
+
+    return f"{value_sign}{rendered}", None
+
+
 class Integer(Item, _CustomInt):
     """
     An integer literal.
@@ -721,6 +844,53 @@ class Integer(Item, _CustomInt):
             raw = f"+{raw}"
 
         return Integer(result, self._trivia.copy(), raw)
+
+    def with_value(
+        self,
+        value: SupportsInt,
+        policy: StylePolicy = StylePolicy.RAISE,
+    ) -> Integer:
+        """Return a new ``Integer`` holding ``value`` while retaining this
+        item's base (decimal, binary, octal or hexadecimal) and effective
+        underscore grouping. Trivia is copied, never shared.
+
+        TOML gives non-decimal integers no sign, so a negative value cannot
+        keep a binary/octal/hexadecimal style. Under the default
+        :attr:`StylePolicy.RAISE` that raises
+        :class:`~tomlkit.exceptions.StylePreservationError`; with
+        :attr:`StylePolicy.FALLBACK` a plain decimal literal is emitted
+        instead. The value is never truncated.
+        """
+        new_value = _integral_value(value)
+        sign, body = _split_number_sign(self._raw)
+        base = _integer_base(body)
+        if base != 10 and new_value < 0:
+            return self._style_fallback(
+                new_value,
+                policy,
+                "TOML non-decimal integers cannot be negative",
+            )
+
+        digit_part = body[2:] if base != 10 else body
+        if base != 10:
+            digits = format(new_value, _INTEGER_FORMAT_SPEC[base])
+        else:
+            digits = str(new_value)
+        raw = _group_digits(digits, _group_size(digit_part))
+        if base != 10:
+            raw = f"0{body[1]}{raw}"
+        elif sign == "+" and new_value >= 0:
+            raw = f"+{raw}"
+
+        return Integer(new_value, self._trivia.copy(), raw)
+
+    def _style_fallback(self, value: int, policy: StylePolicy, reason: str) -> Integer:
+        if policy is StylePolicy.RAISE:
+            raise StylePreservationError(
+                f"Cannot represent {value!r} with the original integer style "
+                f"{self._raw!r}: {reason}."
+            )
+        return Integer(value, self._trivia.copy(), str(value))
 
     def _getstate(self, protocol: int = 3) -> tuple[int, Trivia, str]:
         return int(self), self._trivia, self._raw
@@ -946,6 +1116,48 @@ class Float(Item, _CustomFloat):
             raw = f"+{raw}"
 
         return Float(result, self._trivia.copy(), raw)
+
+    def with_value(
+        self,
+        value: SupportsFloat,
+        policy: StylePolicy = StylePolicy.RAISE,
+    ) -> Float:
+        """Return a new ``Float`` holding ``value`` while retaining this
+        item's notation (fractional or exponent) and effective underscore
+        grouping. Trivia is copied, never shared.
+
+        The value is rendered with Python's shortest round-trip
+        representation, so it is never truncated or padded with fake
+        precision. If the item's notation (plain or exponent) cannot match
+        the new value's round-trip representation, the default
+        :attr:`StylePolicy.RAISE` raises
+        :class:`~tomlkit.exceptions.StylePreservationError`; with
+        :attr:`StylePolicy.FALLBACK` the ordinary representation is used.
+        """
+        new_value = float(value)
+        if math.isnan(new_value) or math.isinf(new_value):
+            raw = str(new_value)
+            if not raw.startswith("-") and self._raw[:1] == "+":
+                raw = f"+{raw}"
+            return Float(new_value, self._trivia.copy(), raw)
+
+        sign, body = _split_number_sign(self._raw)
+        rendered, reason = _render_float_like(body, new_value)
+        if reason is not None:
+            return self._style_fallback(new_value, policy, reason)
+
+        if sign == "+" and new_value >= 0 and not rendered.startswith("-"):
+            rendered = f"+{rendered}"
+
+        return Float(new_value, self._trivia.copy(), rendered)
+
+    def _style_fallback(self, value: float, policy: StylePolicy, reason: str) -> Float:
+        if policy is StylePolicy.RAISE:
+            raise StylePreservationError(
+                f"Cannot represent {value!r} with the original float style "
+                f"{self._raw!r}: {reason}."
+            )
+        return self._new(value)
 
     def _getstate(self, protocol: int = 3) -> tuple[float, Trivia, str]:
         return float(self), self._trivia, self._raw

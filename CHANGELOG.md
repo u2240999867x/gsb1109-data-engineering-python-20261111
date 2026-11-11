@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `Integer.with_value()` and `Float.with_value()` for updating a numeric item's value while keeping its original style: the integer base (decimal, binary, octal, hexadecimal) and the effective underscore grouping are retained, and trivia (including comments) is copied rather than shared. A `StylePolicy` selects the behavior when the new value cannot use the original style: `RAISE` (default) raises the new `StylePreservationError`, while `FALLBACK` emits an ordinary representation. Values are never truncated or rounded, so a fractional float cannot update an integer. Date, time and datetime items are unaffected and keep using `replace()`.
+
 ### Changed
 
 - Speed up repeated array appends by keeping existing indexes instead of rebuilding them.
