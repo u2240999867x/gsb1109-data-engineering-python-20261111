@@ -25,8 +25,9 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
         use_formats=True,
         detailed_exceptions=True,
         fast_fail=True,
+        max_errors=None,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail, max_errors)
         self._json_keywords_to_function.update((
             ('exclusiveMinimum', self.generate_exclusive_minimum),
             ('exclusiveMaximum', self.generate_exclusive_maximum),
@@ -147,6 +148,7 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
                 with self.l('if {variable}_len != 0:'):
                     self.l('{variable}_property_names = True')
                     with self.l('for {variable}_key in {variable}:'):
+                        self.stop_loop_when_budget_spent(self._variable_name)
                         with self.l('try:'):
                             code_len = len(self._code)
                             with self.trial_validation():
@@ -189,6 +191,7 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
             else:
                 self.l('{variable}_contains = False')
                 with self.l('for {variable}_key in {variable}:'):
+                    self.stop_loop_when_budget_spent(self._variable_name)
                     with self.l('try:'):
                         with self.trial_validation():
                             self.generate_func_code_block(

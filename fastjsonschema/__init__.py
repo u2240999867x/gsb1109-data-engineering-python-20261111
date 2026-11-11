@@ -114,6 +114,7 @@ from .draft06 import CodeGeneratorDraft06
 from .draft07 import CodeGeneratorDraft07
 from .draft2019 import CodeGeneratorDraft2019
 from .exceptions import (
+    ErrorBudget,
     JsonSchemaException,
     JsonSchemaValueException,
     JsonSchemaValuesException,
@@ -124,6 +125,7 @@ from .version import VERSION
 
 __all__ = (
     'VERSION',
+    'ErrorBudget',
     'JsonSchemaException',
     'JsonSchemaValueException',
     'JsonSchemaValuesException',
@@ -140,6 +142,17 @@ Formats = Mapping[str, str | Callable[[Any], bool]]
 Validator = Callable[..., Any]
 
 
+def _validate_max_errors(max_errors: int | None, fast_fail: bool) -> None:
+    if max_errors is None:
+        return
+    if isinstance(max_errors, bool) or not isinstance(max_errors, int):
+        raise ValueError('max_errors must be a positive integer or None')
+    if max_errors <= 0:
+        raise ValueError('max_errors must be a positive integer or None')
+    if fast_fail:
+        raise ValueError('max_errors has no effect with fast_fail=True; pass fast_fail=False to collect errors')
+
+
 def validate(
     definition: Definition,
     data: Any,
@@ -149,6 +162,7 @@ def validate(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    max_errors: int | None = None,
 ) -> Any:
     """
     Validation function for lazy programmers or for use cases when you need
@@ -168,8 +182,14 @@ def validate(
     The ``handlers`` parameter controls resolution of remote ``$ref`` URIs; see
     :any:`compile` for details and security considerations when schemas are not
     fully trusted.
+
+    The ``max_errors`` parameter only works with ``fast_fail=False``; see
+    :any:`compile` for its semantics.
     """
-    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail)(data)
+    return compile(
+        definition, handlers, formats, use_default, use_formats,
+        detailed_exceptions, fast_fail, max_errors,
+    )(data)
 
 
 #TODO: Change use_default to False when upgrading to version 3.
@@ -182,6 +202,7 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    max_errors: int | None = None,
 ) -> Validator:
     """
     Generates validation function for validating JSON schema passed in ``definition``.
@@ -270,6 +291,16 @@ def compile(
     By default, the execution stops with the first validation error. If you need
     to collect all the errors, turn this off by passing `fast_fail=False`.
 
+    With `fast_fail=False` you can also pass ``max_errors`` as an error budget
+    for the whole validation run. At most that many errors are collected, and the
+    same budget is shared by nested validation and rules reached through
+    ``$ref``. When the budget is spent, remaining array items and object
+    properties are not walked any further, so memory stays bounded even for huge
+    invalid documents. The raised :any:`JsonSchemaValuesException` then reports
+    ``truncated=True`` and lists the unchecked locations in ``unvalidated``; the
+    reported errors are the same stable prefix an unlimited run would produce.
+    ``max_errors=None`` (the default) keeps collecting every error.
+
     Exception :any:`JsonSchemaDefinitionException` is raised when generating the
     code fails (bad definition).
 
@@ -280,6 +311,7 @@ def compile(
     validation fails (data do not follow the definition) contatining all the errors
     (when fast_fail is set to `False`).
     """
+    _validate_max_errors(max_errors, fast_fail)
     resolver, code_generator = _factory(
         definition,
         handlers,
@@ -288,6 +320,7 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        max_errors,
     )
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
@@ -307,6 +340,7 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    max_errors: int | None = None,
 ) -> str:
     """
     Generates validation code for validating JSON schema passed in ``definition``.
@@ -332,7 +366,11 @@ def compile_to_code(
 
     Remote ``$ref`` URIs are resolved the same way as in :any:`compile`; see its
     documentation for ``handlers`` and security considerations.
+
+    ``max_errors`` only works with ``fast_fail=False`` and has the same semantics
+    as in :any:`compile`.
     """
+    _validate_max_errors(max_errors, fast_fail)
     _, code_generator = _factory(
         definition,
         handlers,
@@ -341,6 +379,7 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        max_errors,
     )
     return (
         'VERSION = "' + VERSION + '"\n' +
@@ -357,6 +396,7 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    max_errors: int | None = None,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
     resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
     code_generator = _get_code_generator_class(definition)(
@@ -367,6 +407,7 @@ def _factory(
         use_formats=use_formats,
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
+        max_errors=max_errors,
     )
     return resolver, code_generator
 

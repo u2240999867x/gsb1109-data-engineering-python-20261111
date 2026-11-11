@@ -41,8 +41,8 @@ class CodeGeneratorDraft04(CodeGenerator):
         'uri': r'^\w+:(\/?\/?)[^\s]+\Z',
     }
 
-    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True):
-        super().__init__(definition, resolver, detailed_exceptions, fast_fail)
+    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True, max_errors=None):
+        super().__init__(definition, resolver, detailed_exceptions, fast_fail, max_errors)
         self._custom_formats = formats
         self._use_formats = use_formats
         self._use_default = use_default
@@ -482,22 +482,26 @@ class CodeGeneratorDraft04(CodeGenerator):
                             self.exc('{name} must contain only specified items', rule='items')
                     else:
                         with self.l('for {variable}_x, {variable}_item in enumerate({variable}[{0}:], {0}):', len(items_definition)):
+                            item_name = '{}[{{{}_x}}]'.format(self._variable_name, self._variable)
+                            self.stop_loop_when_budget_spent(item_name)
                             code_len = len(self._code)
                             self.generate_func_code_block(
                                 self._definition['additionalItems'],
                                 '{}_item'.format(self._variable),
-                                '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
+                                item_name,
                             )
                             if len(self._code) == code_len:
                                 self.l('pass')
             else:
                 if items_definition:
                     with self.l('for {variable}_x, {variable}_item in enumerate({variable}):'):
+                        item_name = '{}[{{{}_x}}]'.format(self._variable_name, self._variable)
+                        self.stop_loop_when_budget_spent(item_name)
                         code_len = len(self._code)
                         self.generate_func_code_block(
                             items_definition,
                             '{}_item'.format(self._variable),
-                            '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
+                            item_name,
                         )
                         if len(self._code) == code_len:
                             self.l('pass')
@@ -599,6 +603,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                 end_of_string_fixed_pattern = DOLLAR_FINDER.sub(r'\\Z', pattern)
                 self._compile_regexps[pattern] = re.compile(end_of_string_fixed_pattern)
             with self.l('for {variable}_key, {variable}_val in {variable}.items():'):
+                self.stop_loop_when_budget_spent('{}.{{{}_key}}'.format(self._variable_name, self._variable))
                 for pattern, definition in self._definition['patternProperties'].items():
                     with self.l('if REGEX_PATTERNS[{}].search({variable}_key):', repr(pattern)):
                         with self.l('if {variable}_key in {variable}_keys:'):
@@ -635,6 +640,7 @@ class CodeGeneratorDraft04(CodeGenerator):
             if add_prop_definition:
                 properties_keys = list(self._definition.get("properties", {}).keys())
                 with self.l('for {variable}_key in {variable}_keys:'):
+                    self.stop_loop_when_budget_spent('{}.{{{}_key}}'.format(self._variable_name, self._variable))
                     with self.l('if {variable}_key not in {}:', properties_keys):
                         self.l('{variable}_value = {variable}.get({variable}_key)')
                         self.generate_func_code_block(

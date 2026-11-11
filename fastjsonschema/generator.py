@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 import re
 
-from .exceptions import JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
+from .exceptions import ErrorBudget, JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
 from .indent import indent
 from .ref_resolver import RefResolver
 
@@ -34,12 +34,16 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True, max_errors=None):
         self._code = []
         self._compile_regexps = {}
         self._custom_formats = {}
         self._detailed_exceptions = detailed_exceptions
         self._fast_fail = fast_fail
+        # Error budget for the whole validation run. It matters only when
+        # fast_fail is off; None means "collect every error" as before.
+        self._max_errors = max_errors
+        self._error_budget_enabled = not fast_fail and max_errors is not None
 
         # Any extra library should be here to be imported only once.
         # Lines are imports to be printed in the file and objects
@@ -99,6 +103,7 @@ class CodeGenerator:
             **self._extra_imports_objects,
             REGEX_PATTERNS=self._compile_regexps,
             re=re,
+            ErrorBudget=ErrorBudget,
             JsonSchemaValueException=JsonSchemaValueException,
             JsonSchemaValuesException=JsonSchemaValuesException,
         )
@@ -111,15 +116,20 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
+        exception_imports = ['JsonSchemaValueException', 'JsonSchemaValuesException']
+        if self._error_budget_enabled:
+            exception_imports.insert(0, 'ErrorBudget')
+        import_line = 'from fastjsonschema import ' + ', '.join(exception_imports)
+
         if not self._compile_regexps:
             return '\n'.join(self._extra_imports_lines + [
-                'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
+                import_line,
                 '',
                 '',
             ])
         return '\n'.join(self._extra_imports_lines + [
             'import re',
-            'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
+            import_line,
             '',
             '',
             'REGEX_PATTERNS = ' + serialize_regexes(self._compile_regexps),
@@ -152,13 +162,28 @@ class CodeGenerator:
         self._validation_functions_done.add(uri)
         self.l('')
         with self._resolver.resolving(uri) as definition:
-            with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
-                if not self._fast_fail:
-                    self.l('errors = []')
-                self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
-                if not self._fast_fail:
-                    self.l('if errors: raise JsonSchemaValuesException(errors)')
-                self.l('return data')
+            if not self._fast_fail:
+                if self._error_budget_enabled:
+                    # The root validation creates the budget shared by nested checks
+                    # and by every function generated for a $ref target; referenced
+                    # functions receive it through the error_budget argument.
+                    with self.l('def {}(data, custom_formats={{}}, name_prefix=None, error_budget=None):', name):
+                        with self.l('if error_budget is None:'):
+                            self.l('error_budget = ErrorBudget({})', self._max_errors)
+                        self.l('errors = []')
+                        self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
+                        self.l('if errors: raise JsonSchemaValuesException(errors, truncated=error_budget.overflowed, unvalidated=list(error_budget.exhausted_locations))')
+                        self.l('return data')
+                else:
+                    with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
+                        self.l('errors = []')
+                        self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
+                        self.l('if errors: raise JsonSchemaValuesException(errors)')
+                        self.l('return data')
+            else:
+                with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
+                    self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
+                    self.l('return data')
 
     def generate_func_code_block(self, definition, variable, variable_name, clear_variables=False):
         """
@@ -240,8 +265,12 @@ class CodeGenerator:
             else:
                 # The referenced function collects into its own list, so merge it into ours
                 # instead of letting it abort the validation of the rest of the document.
+                # When an error budget is in use, the same budget is handed over so the
+                # referenced validation counts against the caller's limit.
+                extra = ', error_budget' if self._error_budget_enabled else ''
+                call_line = name + '({variable}, custom_formats, {name_arg}' + extra + ')'
                 with self.l('try:', optimize=False):
-                    self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                    self.l(call_line, name_arg=name_arg)
                 with self.l('except JsonSchemaValuesException as e:'):
                     self.l('errors.extend(e.errors)')
 
@@ -303,25 +332,53 @@ class CodeGenerator:
         """
         Short-cut for creating raising exception in the code.
         """
-        if not self._detailed_exceptions:
-            if self._fast_fail:
-                self.l('raise JsonSchemaValueException("'+msg+'")', *args)
-            else:
-                self.l('errors.append(JsonSchemaValueException("'+msg+'"))', *args)
-            return
-
         arg = '"'+msg+'"'
         if append_to_msg:
             arg += ' + (' + append_to_msg + ')'
-        # pylint: disable=line-too-long
-        msg = (
-            'raise JsonSchemaValueException('+arg+', value={variable}, name="{name}", definition={definition}, rule={rule})'
-            if self._fast_fail else
-            'errors.append(JsonSchemaValueException('+arg+', value={variable}, name="{name}", definition={definition}, rule={rule}))'
-        )
-        definition = self._expand_refs(self._definition)
-        definition_rule = self.e(definition.get(rule) if isinstance(definition, dict) else None)
-        self.l(msg, *args, definition=repr_default(definition), rule=repr(rule), definition_rule=definition_rule)
+        # First-error mode, and trial subschemas (anyOf, oneOf, not, if,
+        # contains, propertyNames) whose failure is caught by a surrounding try:
+        # they raise unconditionally and never touch the error budget.
+        if self._fast_fail:
+            if not self._detailed_exceptions:
+                self.l('raise JsonSchemaValueException("'+msg+'")', *args)
+                return
+            line = (
+                'raise JsonSchemaValueException('+arg+', value={variable}, name="{name}", definition={definition}, rule={rule})'
+            )
+            definition = self._expand_refs(self._definition)
+            definition_rule = self.e(definition.get(rule) if isinstance(definition, dict) else None)
+            self.l(
+                line, *args,
+                definition=repr_default(definition), rule=repr(rule), definition_rule=definition_rule,
+            )
+            return
+
+        if not self._detailed_exceptions:
+            append_line = 'errors.append(JsonSchemaValueException("'+msg+'"))'
+        else:
+            append_line = (
+                'errors.append(JsonSchemaValueException('+arg+', value={variable}, name="{name}", definition={definition}, rule={rule}))'
+            )
+            definition = self._expand_refs(self._definition)
+            definition_rule = self.e(definition.get(rule) if isinstance(definition, dict) else None)
+            kwargs = dict(
+                definition=repr_default(definition), rule=repr(rule), definition_rule=definition_rule,
+            )
+        if self._error_budget_enabled:
+            # Ask the shared budget before building the error object, so the
+            # number of live exceptions never grows past the configured limit.
+            # optimize=False: record() has a side effect, so two adjacent error
+            # rules must never be merged into one shared check by the optimizer.
+            with self.l('if error_budget.record():', optimize=False):
+                if self._detailed_exceptions:
+                    self.l(append_line, *args, **kwargs)
+                else:
+                    self.l(append_line, *args)
+        else:
+            if self._detailed_exceptions:
+                self.l(append_line, *args, **kwargs)
+            else:
+                self.l(append_line, *args)
 
     def _expand_refs(self, definition):
         if isinstance(definition, list):
@@ -389,6 +446,27 @@ class CodeGenerator:
             return
         self._variables[variable_name] = tuple(self._scope_stack)
         self.l('{variable}_is_dict = isinstance({variable}, dict)')
+
+    def stop_loop_when_budget_spent(self, location_name):
+        """
+        Emit a guard at the top of a loop walking data (array items or object
+        values) that stops the loop once the shared error budget is spent and
+        records the first location left unchecked. It is a no-op when no error
+        budget is configured, keeping the generated code unchanged.
+
+        ``location_name`` is the generated data name of the item about to be
+        checked (for example ``data.arr[{data_arr_x}]`` or ``data.{data_key}``).
+        """
+        if not self._error_budget_enabled:
+            return
+        assert location_name.startswith('data')
+        path = location_name[4:]
+        location = '(name_prefix or "data") + "{}"'.format(path)
+        if '{' in location or '}' in location:
+            location += '.format(**locals())'
+        with self.l('if error_budget.is_exhausted:', optimize=False):
+            self.l('error_budget.note_exhausted({})', location)
+            self.l('break')
 
 
 def serialize_regexes(patterns_dict):

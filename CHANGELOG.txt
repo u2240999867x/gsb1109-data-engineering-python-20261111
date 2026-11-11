@@ -1,5 +1,6 @@
 === UNRELEASED
 
+* Added `max_errors` error budget for `compile`, `validate` and `compile_to_code` (with `fast_fail=False`): at most that many errors are collected for the whole run, shared by nested validation and rules behind `$ref`; remaining array items and object properties stop being walked once the budget is spent, and the raised `JsonSchemaValuesException` exposes `truncated`, `unvalidated` and `total_errors`
 * Fixed `$` in `patternProperties` matching before a trailing newline, which also made a `pattern` with the same regex accept a trailing newline
 
 === 2.22.3 (2026-11-01)
