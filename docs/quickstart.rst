@@ -67,6 +67,38 @@ TOML Kit provides an intuitive API to modify TOML documents::
     >>> doc.pop("table2")
     # del doc["table2] is also possible
 
+Moving tables
+~~~~~~~~~~~~~
+
+Use ``move_to_end()`` to relocate one or more tables (or arrays of tables)
+to the end of a document or another table while keeping their comments, blank
+lines and formatting. The surrounding comments can be moved along or left in
+place as separators with the ``before`` and ``after`` flags::
+
+    >>> doc = parse("""root = 1
+    ...
+    ... # data source
+    ... [servers.alpha]
+    ... ip = "10.0.0.1"
+    ...
+    ... [other]
+    ... x = 1
+    ... """)
+    >>> doc.move_to_end("servers")
+    >>> print(dumps(doc), end="")
+    root = 1
+    [other]
+    x = 1
+
+    # data source
+    [servers.alpha]
+    ip = "10.0.0.1"
+
+    Pass a list of keys to move several tables together, preserving their
+    relative order. Dotted-key tables, implicit parent tables and the elements
+    of an array of tables are always moved as a whole, so re-parsing the result
+    yields the same values and table ownership.
+
 Boolean comments
 ~~~~~~~~~~~~~~~~
 

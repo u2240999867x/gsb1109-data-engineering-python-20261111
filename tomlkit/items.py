@@ -1906,6 +1906,18 @@ class AbstractTable(Item, _CustomDict):  # type: ignore[type-arg]
 
         return self
 
+    def move_to_end(
+        self: AT,
+        key: Key | str | Sequence[Key | str],
+        *,
+        before: bool = True,
+        after: bool = True,
+    ) -> AT:
+        """Move one or more contained tables to the end of this table."""
+        self._value.move_to_end(key, before=before, after=after)
+
+        return self
+
     def item(self, key: Key | str) -> Item | OutOfOrderTableProxy:
         return self._value.item(key)
 

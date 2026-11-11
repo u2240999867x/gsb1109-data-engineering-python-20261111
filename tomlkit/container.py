@@ -4,6 +4,7 @@ import copy
 import math
 
 from collections.abc import Iterator
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 from typing import Any
 
@@ -100,6 +101,39 @@ def _render_empty_aot(key: str, aot: AoT) -> str:
         f"{decode(aot.trivia.comment)}"
         f"{aot.trivia.trail or chr(10)}"
     )
+
+
+def _is_detached_comment(item: Item) -> bool:
+    """Whether ``item`` is a standalone comment or blank line.
+
+    Such entries are stored with a ``None`` key, unlike comments attached to a
+    value through its trivia, so they can be picked up and moved together with
+    the table next to them. ``Null`` placeholders left behind by deletions are
+    deliberately excluded.
+    """
+    return isinstance(item, (Comment, Whitespace))
+
+
+def _run_back_over_detached(body: list[tuple[Key | None, Item]], index: int) -> int:
+    """First index of the detached comment/whitespace run ending at ``index``."""
+    while (
+        index > 0
+        and body[index - 1][0] is None
+        and _is_detached_comment(body[index - 1][1])
+    ):
+        index -= 1
+    return index
+
+
+def _run_forward_over_detached(body: list[tuple[Key | None, Item]], index: int) -> int:
+    """Index just past the detached comment/whitespace run starting at ``index``."""
+    while (
+        index < len(body)
+        and body[index][0] is None
+        and _is_detached_comment(body[index][1])
+    ):
+        index += 1
+    return index
 
 
 class Container(_CustomDict):  # type: ignore[type-arg]
@@ -588,6 +622,195 @@ class Container(_CustomDict):  # type: ignore[type-arg]
         dict.__delitem__(self, key.key)
 
         return self
+
+    def move_to_end(
+        self,
+        key: Key | str | Sequence[Key | str],
+        *,
+        before: bool = True,
+        after: bool = True,
+    ) -> Container:
+        """Move one or more tables (or arrays of tables) to the end.
+
+        The named entries are relocated as a unit, keeping their relative
+        order, and everything else is left untouched. This is a structural
+        move: the items themselves, including their comments, indentation and
+        blank lines, are preserved byte for byte, so re-parsing the result
+        yields the same values and table ownership as the original document.
+
+        :param key: the table key to move, or a sequence of keys moved together
+            in the given order.
+        :param before: when true (the default), the standalone comments and
+            blank lines immediately preceding each entry travel with it. When
+            false, they are treated as separators and stay in place.
+        :param after: same as ``before`` for the entries following the table.
+
+        Only tables and arrays of tables can be moved. Moving a table takes
+        every fragment defining it, including the implicit parent fragments of
+        dotted headers and out-of-order table parts, so no definition can be
+        duplicated by the move. Dotted-key tables that would be swallowed by a
+        header left behind are re-emitted with their own ``[header]`` instead.
+        """
+        if isinstance(key, (list, tuple)):
+            for part in key:
+                self.move_to_end(part, before=before, after=after)
+            return self
+
+        if not isinstance(key, Key):
+            if not isinstance(key, str):
+                raise TypeError(
+                    "move_to_end() expects a key (str/Key) or a sequence of keys"
+                )
+            key = SingleKey(key)
+
+        if key not in self._map:
+            raise NonExistentKey(key)
+
+        spans, owned = self._move_spans(key, before=before, after=after)
+        for position in owned:
+            if not isinstance(self._body[position][1], (Table, AoT)):
+                raise TOMLKitError(
+                    f'Only tables and arrays of tables can be moved, got "{key}"'
+                )
+
+        body = self._body
+        in_span = {index for start, end in spans for index in range(start, end)}
+        block = [entry for start, end in spans for entry in body[start:end]]
+        kept = [entry for index, entry in enumerate(body) if index not in in_span]
+
+        kept_has_header = any(
+            isinstance(item, AoT)
+            or (
+                isinstance(item, Table)
+                and not (entry_key is not None and entry_key.is_dotted())
+            )
+            for entry_key, item in kept
+        )
+        block_has_dotted = any(
+            entry_key is not None and entry_key.is_dotted() for entry_key, _ in block
+        )
+
+        if block_has_dotted and kept_has_header:
+            # A dotted-key fragment renders inline and would be captured by the
+            # scope of a header that stays behind. Let the regular append
+            # machinery re-emit the fragments as proper headers; the detached
+            # comments selected by the caller are carried over manually.
+            self._move_normalize(key, spans, kept, owned)
+        else:
+            self._replace_body(kept + block)
+            for out_of_order_key in self._out_of_order_keys:
+                self._validate_out_of_order_table(out_of_order_key)
+
+        return self
+
+    def _move_spans(
+        self, key: Key, *, before: bool, after: bool
+    ) -> tuple[list[tuple[int, int]], set[int]]:
+        """Body spans covering every fragment of ``key`` and its comments.
+
+        Returns the merged ``(start, end)`` spans to relocate and the set of
+        body positions actually owned by ``key``.
+        """
+        index = self._map[key]
+        positions = list(index) if isinstance(index, tuple) else [index]
+        owned = set(positions)
+
+        body = self._body
+        core: list[list[int]] = []
+        i = 0
+        size = len(body)
+        while i < size:
+            if i not in owned:
+                i += 1
+                continue
+            start = i
+            i += 1
+            while i < size:
+                if i in owned:
+                    i += 1
+                    continue
+                if body[i][0] is None and _is_detached_comment(body[i][1]):
+                    end = _run_forward_over_detached(body, i)
+                    if end < size and end in owned:
+                        i = end
+                        continue
+                break
+            core.append([start, i])
+
+        spans: list[tuple[int, int]] = []
+        for start, end in core:
+            if before:
+                start = _run_back_over_detached(body, start)
+            if after:
+                end = _run_forward_over_detached(body, end)
+            spans.append((start, end))
+
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged, owned
+
+    def _move_normalize(
+        self,
+        key: Key,
+        spans: list[tuple[int, int]],
+        kept: list[tuple[Key | None, Item]],
+        owned: set[int],
+    ) -> None:
+        """Move dotted-key fragments by re-emitting them as regular headers."""
+        last_owned = max(owned)
+        leading: list[tuple[Key | None, Item]] = []
+        trailing: list[tuple[Key | None, Item]] = []
+        for start, end in spans:
+            for position in range(start, end):
+                entry_key, _ = self._body[position]
+                if entry_key is not None:
+                    continue
+                if position < last_owned:
+                    leading.append(self._body[position])
+                else:
+                    trailing.append(self._body[position])
+
+        # The proxy merges the fragments without mutating them, so it must be
+        # captured before the body is rebuilt without them.
+        proxy = self.item(key)
+        self._replace_body(kept)
+        for entry in leading:
+            self._body.append(entry)
+        self[key] = proxy
+        for entry in trailing:
+            self._body.append(entry)
+
+    def _replace_body(self, new_body: list[tuple[Key | None, Item]]) -> None:
+        """Rebuild the index structures to match a reordered ``new_body``."""
+        self._body = new_body
+        self._map.clear()
+        self._table_keys.clear()
+        dict.clear(self)
+        for position, (key, item) in enumerate(new_body):
+            if key is None:
+                continue
+            if key in self._map:
+                current = self._map[key]
+                if not isinstance(current, tuple):
+                    current = (current,)
+                self._map[key] = (*current, position)
+            else:
+                self._map[key] = position
+            if isinstance(item, (Table, AoT)):
+                self._table_keys.append(key)
+            dict.__setitem__(self, key.key, item.value)
+
+        self._out_of_order_keys.clear()
+        self._out_of_order_keys.update(
+            stored_key
+            for stored_key, value in self._map.items()
+            if isinstance(value, tuple)
+        )
+        self._validation_cache.clear()
 
     def _insert_at(self, idx: int, key: Key | str, item: Any) -> Container:
         if idx > len(self._body) - 1:

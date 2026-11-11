@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `move_to_end()` to `Container`, `TOMLDocument` and tables to relocate one or more tables (or arrays of tables) to the end while preserving their comments, blank lines and formatting. Adjacent standalone comments can be moved along or kept in place as separators via the `before`/`after` flags; implicit parent tables, dotted-key tables and array-of-tables elements are moved as a whole so no definition is duplicated and the re-parsed values are unchanged.
+
 ### Changed
 
 - Speed up repeated array appends by keeping existing indexes instead of rebuilding them.
