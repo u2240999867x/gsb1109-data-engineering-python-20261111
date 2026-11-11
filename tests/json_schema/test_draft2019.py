@@ -35,6 +35,7 @@ def pytest_generate_tests(metafunc):
             'dependentSchemas.json',
             'maxContains.json',
             'minContains.json',
+            'prefixItems.json',
             'recursiveRef.json',
             'unevaluatedItems.json',
             'unevaluatedProperties.json',

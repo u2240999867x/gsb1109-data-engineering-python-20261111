@@ -118,8 +118,10 @@ from .exceptions import (
     JsonSchemaValueException,
     JsonSchemaValuesException,
     JsonSchemaDefinitionException,
+    JsonSchemaUnsupportedException,
 )
 from .ref_resolver import RefResolver
+from .schema_validator import validate_schema_definition
 from .version import VERSION
 
 __all__ = (
@@ -128,6 +130,7 @@ __all__ = (
     'JsonSchemaValueException',
     'JsonSchemaValuesException',
     'JsonSchemaDefinitionException',
+    'JsonSchemaUnsupportedException',
     'validate',
     'compile',
     'compile_to_code',
@@ -273,6 +276,10 @@ def compile(
     Exception :any:`JsonSchemaDefinitionException` is raised when generating the
     code fails (bad definition).
 
+    Exception :any:`JsonSchemaUnsupportedException` is raised when the definition
+    is valid according to its declared draft, but uses a feature this
+    implementation does not support yet.
+
     Exception :any:`JsonSchemaValueException` is raised from generated function when
     validation fails (data do not follow the definition).
 
@@ -328,7 +335,8 @@ def compile_to_code(
         python3 -m fastjsonschema "{'type': 'string'}" > your_file.py
 
     Exception :any:`JsonSchemaDefinitionException` is raised when generating the
-    code fails (bad definition).
+    code fails (bad definition) and :any:`JsonSchemaUnsupportedException` when
+    the definition is valid but uses an unsupported feature.
 
     Remote ``$ref`` URIs are resolved the same way as in :any:`compile`; see its
     documentation for ``handlers`` and security considerations.
@@ -368,6 +376,7 @@ def _factory(
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
     )
+    validate_schema_definition(definition, resolver, code_generator)
     return resolver, code_generator
 
 

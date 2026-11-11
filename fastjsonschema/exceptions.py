@@ -10,6 +10,10 @@ class JsonSchemaException(ValueError):
     Base exception of ``fastjsonschema`` library.
     """
 
+    def __init__(self, message: str = '') -> None:
+        super().__init__(message)
+        self.message = message
+
 
 class JsonSchemaValueException(JsonSchemaException):
     """
@@ -72,4 +76,15 @@ class JsonSchemaValuesException(JsonSchemaException):
 class JsonSchemaDefinitionException(JsonSchemaException):
     """
     Exception raised by generator of validation function.
+    """
+
+
+class JsonSchemaUnsupportedException(JsonSchemaException):
+    """
+    Exception raised before generating the validation function when the
+    schema is valid according to its declared draft, but uses a keyword
+    defined by that draft which this implementation does not support yet.
+
+    This is deliberately distinct from :any:`JsonSchemaDefinitionException`,
+    which means the schema itself is written incorrectly.
     """
