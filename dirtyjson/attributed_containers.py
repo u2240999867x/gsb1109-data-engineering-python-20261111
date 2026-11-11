@@ -32,6 +32,7 @@ class AttributedDict(dict, DictMixin):
     def __init__(self):
         super(AttributedDict, self).__init__()
         self.__attributes = {}
+        self.__all_attributes = {}
         self.clear()
 
     # noinspection PyAttributeOutsideInit
@@ -39,14 +40,23 @@ class AttributedDict(dict, DictMixin):
         self.__end = end = []
         end += [None, end, end]         # sentinel node for doubly linked list
         self.__map = {}                 # key --> [key, prev, next]
+        self.__all_attributes = {}
         dict.clear(self)
 
     def add_with_attributes(self, key, value, attributes):
         self.__setitem__(key, value)
         self.__attributes[key] = attributes
+        self.__all_attributes.setdefault(key, []).append(attributes)
 
     def attributes(self, key):
         return self.__attributes.get(key)
+
+    def attributes_all(self, key):
+        """All attribute records for *key*, one per occurrence in the source.
+
+        Duplicate keys overwrite each other in the mapping itself, but every
+        occurrence's position is retained here in source order."""
+        return list(self.__all_attributes.get(key, ()))
 
     def __setitem__(self, key, value):
         if key not in self:

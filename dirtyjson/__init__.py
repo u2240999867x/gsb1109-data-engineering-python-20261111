@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 from .error import Error
 from .loader import DirtyJSONLoader
+from .editor import replace_value, AmbiguousPathError
 
 r"""JSON (JavaScript Object Notation) <http://json.org> is a subset of
 JavaScript syntax (ECMA-262 3rd edition) used as a lightweight data
@@ -27,7 +28,7 @@ Decoding JSON::
     True
 
 """
-__all__ = ['load', 'loads', 'Error']
+__all__ = ['load', 'loads', 'Error', 'replace_value', 'AmbiguousPathError']
 
 __author__ = 'Scott Maxwell <scott@codecobblers.com>'
 

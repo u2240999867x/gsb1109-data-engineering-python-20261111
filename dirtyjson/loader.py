@@ -46,9 +46,11 @@ DEFAULT_ENCODING = "utf-8"
 
 
 class Position(object):
-    def __init__(self, line, column):
+    def __init__(self, line, column, index=None):
         self.line = line
         self.column = column
+        self.index = index
+        self.end = None
 
     def __lt__(self, other):
         if self.line > other.line:
@@ -161,7 +163,7 @@ class DirtyJSONLoader(object):
             self.pos = end
 
     def _current_position(self, offset=0):
-        return Position(self.lineno, self.pos - self.current_line_pos + 1 + offset)
+        return Position(self.lineno, self.pos - self.current_line_pos + 1 + offset, self.pos + offset)
 
     def scan(self):
         self.expecting = 'Expecting value'
@@ -316,6 +318,7 @@ class DirtyJSONLoader(object):
             self._skip_whitespace()
             key_value_pos = KeyValuePosition(key_pos, self._current_position())
             value = self.scan()
+            key_value_pos.value.end = self._current_position()
             obj.add_with_attributes(key, value, key_value_pos)
 
             nextchar = self._next_character_after_whitespace()
@@ -342,6 +345,7 @@ class DirtyJSONLoader(object):
             self.pos -= len(nextchar)
             value_pos = self._current_position()
             value = self.scan()
+            value_pos.end = self._current_position()
             values.append(value, value_pos)
             nextchar = self._next_character_after_whitespace()
             if nextchar == ']':
