@@ -88,6 +88,7 @@ Python iterables.
 |                        | `minmax <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.minmax>`_,                                                                                 |
 |                        | `first_true <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.first_true>`_,                                                                         |
 |                        | `quantify <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.quantify>`_,                                                                             |
+|                        | `top_n <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.top_n>`_,                                                                                   |
 |                        | `iequals <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.iequals>`_                                                                                |
 +------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | Selecting              | `islice_extended <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.islice_extended>`_,                                                               |

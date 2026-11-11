@@ -8,6 +8,9 @@ Version History
 Unreleased
 ----------
 
+* New functions:
+    * :func:`top_n` selects the *n* highest-scoring elements of a one-shot iterable, retaining every element tied with the cutoff score, with an optional output bound and an explicit truncation status via :class:`TopNResult`
+
 * Updated functions:
     * :func:`peekable` was updated to avoid caching the entire iterable when sliced with a negative step and omitted *stop*.
 

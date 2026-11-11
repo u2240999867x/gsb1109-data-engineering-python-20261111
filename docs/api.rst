@@ -167,6 +167,8 @@ These tools return summarized or aggregated data from an iterable.
 .. autofunction:: all_unique
 .. autofunction:: argmin
 .. autofunction:: argmax
+.. autofunction:: top_n
+.. autoclass:: TopNResult
 .. function:: minmax(iterable, *[, key, default])
 .. autofunction:: minmax(arg1, arg2, *args[, key])
   :noindex:

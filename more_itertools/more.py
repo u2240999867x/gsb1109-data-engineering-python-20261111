@@ -7,7 +7,7 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Sequence
 from contextlib import suppress
 from functools import cached_property, partial, wraps
-from heapq import heapify, heapreplace
+from heapq import heapify, heappop, heappush, heapreplace
 from itertools import (
     chain,
     combinations,
@@ -61,6 +61,7 @@ from .recipes import (
 __all__ = [
     'AbortThread',
     'SequenceView',
+    'TopNResult',
     'adjacent',
     'all_unique',
     'always_iterable',
@@ -170,6 +171,7 @@ __all__ = [
     'synchronized',
     'takewhile_inclusive',
     'time_limited',
+    'top_n',
     'unique_in_window',
     'unique_to_each',
     'unzip',
@@ -5397,6 +5399,161 @@ def argmax(iterable, *, key=None):
     if key is not None:
         iterable = map(key, iterable)
     return max(enumerate(iterable), key=itemgetter(1))[0]
+
+
+class TopNResult(tuple):
+    """Result of :func:`top_n`.
+
+    A tuple of the selected elements, ordered by descending score and by
+    original position for equal scores. It also reports whether elements
+    sharing the cutoff score had to be left out:
+
+    * ``values`` -- the selected elements
+    * ``truncated`` -- ``True`` when one or more elements with the same
+      score as the last selected element were not delivered, either because
+      they would exceed *max_output* or because *include_ties* was disabled
+    * ``cutoff_score`` -- the score of the last selected element, or
+      ``None`` when the input was empty
+    """
+
+    def __new__(cls, values, truncated, cutoff_score):
+        self = super().__new__(cls, values)
+        self.truncated = truncated
+        self.cutoff_score = cutoff_score
+        return self
+
+    def __repr__(self):
+        return (
+            f'TopNResult(values={tuple.__repr__(self)}, '
+            f'truncated={self.truncated!r}, '
+            f'cutoff_score={self.cutoff_score!r})'
+        )
+
+
+def _discard_latest_cutoff_tie(heap):
+    """Drop the latest-positioned entry sharing the heap's minimum score.
+
+    The heap never holds more than one element over its bound, so the
+    minimum-score entries are the cutoff ties; removing the largest input
+    position keeps the earliest occurrences.
+    """
+    cutoff = heap[0][0]
+    latest = max(index for score, index, _ in heap if score == cutoff)
+    heap[:] = [entry for entry in heap if entry[1] != latest]
+    heapify(heap)
+
+
+def top_n(iterable, n=10, *, key=None, include_ties=True, max_output=None):
+    """Select the *n* highest-scoring elements from a one-shot input.
+
+    Every element tied with the *n*\\ -th highest score is retained when
+    *include_ties* is true, so the result may contain more than *n*
+    elements. The selection consumes *iterable* in a single pass, which
+    makes it usable with generators and other iterables that cannot be
+    replayed.
+
+        >>> scores = [90, 85, 85, 80, 70]
+        >>> result = top_n(scores, 2)
+        >>> list(result)
+        [90, 85, 85]
+        >>> result.truncated
+        False
+
+    *key* computes each element's score once and only once; the original
+    elements are returned, not their scores. Results are ordered by
+    descending score, and elements with equal scores keep their relative
+    order from the input:
+
+        >>> data = [('a', 1), ('b', 2), ('c', 2), ('d', 1)]
+        >>> list(top_n(data, 1, key=lambda pair: pair[1]))
+        [('b', 2), ('c', 2)]
+
+    *max_output* bounds the number of delivered elements. When the bound
+    would drop elements that share the cutoff score, the kept elements are
+    never picked arbitrarily -- the earliest occurrences win, and
+    ``truncated`` reports that undelivered ties remain:
+
+        >>> result = top_n(scores, 2, max_output=2)
+        >>> list(result)
+        [90, 85]
+        >>> result.truncated
+        True
+
+    Set *include_ties* to ``False`` to select exactly *n* elements; ties
+    at the cutoff are then reported through ``truncated`` as well.
+
+    Raise ``ValueError`` if *n* or *max_output* is not a positive integer,
+    or if *max_output* is smaller than *n*.
+    """
+    if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+        raise ValueError('n must be a positive integer')
+    if max_output is not None and (
+        isinstance(max_output, bool)
+        or not isinstance(max_output, int)
+        or max_output <= 0
+    ):
+        raise ValueError('max_output must be a positive integer or None')
+    if max_output is not None and max_output < n:
+        raise ValueError('max_output must be at least n')
+
+    score = key if key is not None else lambda item: item
+
+    # Slot heap: the n highest entries seen, tracking the cutoff score.
+    # Retained heap: every deliverable entry at or above the cutoff.
+    slot_heap = []
+    retained = []
+    dropped_ties = 0
+
+    for index, item in enumerate(iterable):
+        entry = (score(item), index, item)
+        if len(slot_heap) < n:
+            heappush(slot_heap, entry)
+            heappush(retained, entry)
+            continue
+
+        cutoff = slot_heap[0][0]
+        if entry[0] < cutoff:
+            continue
+        if entry[0] == cutoff:
+            if include_ties and (
+                max_output is None or len(retained) < max_output
+            ):
+                heappush(retained, entry)
+            else:
+                dropped_ties += 1
+            continue
+
+        # A strictly higher score raises the cutoff, possibly evicting
+        # entries that can never qualify for any later prefix again.
+        heapreplace(slot_heap, entry)
+        new_cutoff = slot_heap[0][0]
+        heappush(retained, entry)
+        while retained[0][0] < new_cutoff:
+            heappop(retained)
+        if new_cutoff > cutoff:
+            # Earlier rejections now score below the raised cutoff and no
+            # longer count as undelivered ties.
+            dropped_ties = 0
+        if not include_ties:
+            # Keep exactly n entries, retaining the earliest cutoff ties.
+            while len(retained) > n:
+                _discard_latest_cutoff_tie(retained)
+                dropped_ties += 1
+        if max_output is not None:
+            while len(retained) > max_output:
+                _discard_latest_cutoff_tie(retained)
+                dropped_ties += 1
+
+    if not slot_heap:
+        return TopNResult([], False, None)
+
+    # Stable ordering: first by original position, then by descending
+    # score, so equal-score elements retain their relative input order.
+    ranked = sorted(retained, key=itemgetter(1))
+    ranked.sort(key=itemgetter(0), reverse=True)
+    cutoff_score = slot_heap[0][0]
+    values = [item for _, _, item in ranked]
+    return TopNResult(values, dropped_ties > 0, cutoff_score)
 
 
 def _extract_monotonic(iterator, indices):

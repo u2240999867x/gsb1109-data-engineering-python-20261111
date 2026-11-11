@@ -6878,6 +6878,149 @@ class ArgMinArgMaxTests(TestCase):
                 self.assertEqual(mi.argmax(iterable, key=key), expected_max)
 
 
+class TopNTests(TestCase):
+    def test_default_n(self):
+        data = list(range(15))
+        result = mi.top_n(data)
+        self.assertEqual(list(result), list(range(14, 4, -1)))
+        self.assertFalse(result.truncated)
+        self.assertEqual(result.cutoff_score, 5)
+
+    def test_ties_at_cutoff_are_retained(self):
+        data = [90, 85, 85, 80, 70]
+        result = mi.top_n(data, 2)
+        self.assertEqual(list(result), [90, 85, 85])
+        self.assertFalse(result.truncated)
+        self.assertEqual(result.cutoff_score, 85)
+
+    def test_all_tied(self):
+        result = mi.top_n([5, 5, 5, 5], 2)
+        self.assertEqual(list(result), [5, 5, 5, 5])
+        self.assertFalse(result.truncated)
+        self.assertEqual(result.cutoff_score, 5)
+
+    def test_stable_ordering(self):
+        data = [('a', 1), ('b', 2), ('c', 2), ('d', 1), ('e', 2)]
+        result = mi.top_n(data, 1, key=lambda pair: pair[1])
+        self.assertEqual(list(result), [('b', 2), ('c', 2), ('e', 2)])
+        self.assertEqual(result.cutoff_score, 2)
+
+    def test_key_is_called_once_per_item(self):
+        seen = []
+
+        def key(value):
+            seen.append(value)
+            return value[1]
+
+        data = [('a', 1), ('b', 2), ('c', 2), ('d', 3)]
+        result = mi.top_n(iter(data), 2, key=key)
+        self.assertEqual(seen, data)
+        self.assertEqual(list(result), [('d', 3), ('b', 2), ('c', 2)])
+
+    def test_one_shot_input_is_consumed_once(self):
+        source = (x for x in [3, 1, 4, 1, 5, 9, 2, 6])
+        result = mi.top_n(source, 3)
+        self.assertEqual(list(result), [9, 6, 5])
+        self.assertEqual(result.cutoff_score, 5)
+        self.assertEqual(list(source), [])
+
+    def test_include_ties_false(self):
+        result = mi.top_n([90, 85, 85, 80], 2, include_ties=False)
+        self.assertEqual(list(result), [90, 85])
+        self.assertTrue(result.truncated)
+        self.assertEqual(result.cutoff_score, 85)
+
+    def test_include_ties_false_without_cutoff_ties(self):
+        result = mi.top_n([90, 85, 80], 2, include_ties=False)
+        self.assertEqual(list(result), [90, 85])
+        self.assertFalse(result.truncated)
+
+    def test_include_ties_false_shrinks_on_cutoff_rise(self):
+        # Two retained cutoff ties must shrink to n when a higher score
+        # raises the cutoff; the earliest tie is kept, the other reported.
+        result = mi.top_n([1, 1, 2], 2, include_ties=False)
+        self.assertEqual(list(result), [2, 1])
+        self.assertTrue(result.truncated)
+        self.assertEqual(result.cutoff_score, 1)
+
+    def test_max_output_truncates_and_keeps_earliest(self):
+        result = mi.top_n([9, 8, 8, 8, 8, 7], 3, max_output=3)
+        self.assertEqual(list(result), [9, 8, 8])
+        self.assertTrue(result.truncated)
+        self.assertEqual(result.cutoff_score, 8)
+
+    def test_max_output_absorbs_all_ties(self):
+        result = mi.top_n([90, 85, 85, 80], 2, max_output=4)
+        self.assertEqual(list(result), [90, 85, 85])
+        self.assertFalse(result.truncated)
+
+    def test_cap_resize_when_cutoff_rises(self):
+        # The cap binds while the cutoff score is unchanged; the earliest
+        # cutoff ties are kept and the overflow is reported as truncated.
+        result = mi.top_n([3, 3, 3, 3, 5], 2, max_output=3)
+        self.assertEqual(list(result), [5, 3, 3])
+        self.assertTrue(result.truncated)
+        self.assertEqual(result.cutoff_score, 3)
+
+    def test_truncation_resets_when_cutoff_rises(self):
+        # A dropped 5-score tie becomes irrelevant once later high scores
+        # raise the cutoff to 6, so the result must not claim truncation.
+        result = mi.top_n([5, 5, 5, 6, 7], 2, max_output=2)
+        self.assertEqual(list(result), [7, 6])
+        self.assertFalse(result.truncated)
+        self.assertEqual(result.cutoff_score, 6)
+
+    def test_truncation_persists_without_cutoff_rise(self):
+        # With the cutoff unchanged, a dropped cutoff tie stays undelivered.
+        result = mi.top_n([5, 5, 5, 6], 2, max_output=2)
+        self.assertEqual(list(result), [6, 5])
+        self.assertTrue(result.truncated)
+        self.assertEqual(result.cutoff_score, 5)
+
+    def test_empty_input(self):
+        result = mi.top_n([], 3)
+        self.assertEqual(list(result), [])
+        self.assertFalse(result.truncated)
+        self.assertIsNone(result.cutoff_score)
+
+    def test_n_larger_than_input(self):
+        result = mi.top_n([1, 1, 2], 10)
+        self.assertEqual(list(result), [2, 1, 1])
+        self.assertFalse(result.truncated)
+        self.assertEqual(result.cutoff_score, 1)
+
+    def test_result_type_and_repr(self):
+        result = mi.top_n([1, 2], 1)
+        self.assertIsInstance(result, tuple)
+        self.assertIsInstance(result, mi.TopNResult)
+        self.assertEqual(
+            repr(result),
+            'TopNResult(values=(2,), truncated=False, cutoff_score=2)',
+        )
+
+    def test_invalid_n(self):
+        for n in (0, -1, 1.5):
+            with self.subTest(n=n):
+                self.assertRaises(ValueError, lambda: mi.top_n([1], n))
+        self.assertRaises(ValueError, lambda: mi.top_n([1], True))
+
+    def test_invalid_max_output(self):
+        for max_output in (0, -1, 1.5):
+            with self.subTest(max_output=max_output):
+                self.assertRaises(
+                    ValueError,
+                    lambda: mi.top_n([1], 1, max_output=max_output),
+                )
+        self.assertRaises(
+            ValueError, lambda: mi.top_n([1], 1, max_output=True)
+        )
+
+    def test_max_output_below_n(self):
+        self.assertRaises(
+            ValueError, lambda: mi.top_n([1, 2, 3], 3, max_output=2)
+        )
+
+
 class ExtractTests(TestCase):
     def test_basics(self):
         extract = mi.extract

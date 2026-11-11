@@ -34,6 +34,7 @@ from _typeshed import (
 __all__ = [
     'AbortThread',
     'SequenceView',
+    'TopNResult',
     'adjacent',
     'all_unique',
     'always_iterable',
@@ -143,6 +144,7 @@ __all__ = [
     'synchronized',
     'takewhile_inclusive',
     'time_limited',
+    'top_n',
     'unique_in_window',
     'unique_to_each',
     'unzip',
@@ -995,6 +997,36 @@ def argmin(
 def argmax(
     iterable: Iterable[_T], *, key: Callable[[_T], _U] | None = ...
 ) -> int: ...
+
+class TopNResult(tuple[_T]):
+    truncated: bool
+    cutoff_score: Any
+
+    def __new__(
+        cls,
+        values: Iterable[_T],
+        truncated: bool,
+        cutoff_score: Any,
+    ) -> TopNResult[_T]: ...
+
+@overload
+def top_n(
+    iterable: Iterable[_SupportsLessThanT],
+    n: int = ...,
+    *,
+    key: None = ...,
+    include_ties: bool = ...,
+    max_output: int | None = ...,
+) -> TopNResult[_SupportsLessThanT]: ...
+@overload
+def top_n(
+    iterable: Iterable[_T],
+    n: int = ...,
+    *,
+    key: Callable[[_T], _SupportsLessThan],
+    include_ties: bool = ...,
+    max_output: int | None = ...,
+) -> TopNResult[_T]: ...
 def extract(
     iterable: Iterable[_T],
     indices: Iterable[int],
