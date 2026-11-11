@@ -227,6 +227,7 @@ How to:
 - [Revalidate an already validated document](https://hitchdev.com/strictyaml/using/alpha/howto/revalidation)
 - [Reading in YAML, editing it and writing it back out](https://hitchdev.com/strictyaml/using/alpha/howto/roundtripping)
 - [Get line numbers of YAML elements](https://hitchdev.com/strictyaml/using/alpha/howto/what-line)
+- [Load multi-document YAML streams](https://hitchdev.com/strictyaml/using/alpha/howto/load-multi-document-yaml)
 - [Parsing YAML without a schema](https://hitchdev.com/strictyaml/using/alpha/howto/without-a-schema)
 
 

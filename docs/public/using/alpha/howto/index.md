@@ -9,4 +9,5 @@ title: How to...
 - [Revalidate an already validated document](revalidation)
 - [Reading in YAML, editing it and writing it back out](roundtripping)
 - [Get line numbers of YAML elements](what-line)
+- [Load multi-document YAML streams](load-multi-document-yaml)
 - [Parsing YAML without a schema](without-a-schema)

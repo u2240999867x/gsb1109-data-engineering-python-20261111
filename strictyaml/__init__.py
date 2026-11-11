@@ -2,6 +2,12 @@
 from strictyaml.parser import load
 from strictyaml.parser import dirty_load
 
+# Multi-document stream loader
+from strictyaml.multidoc import load_all
+from strictyaml.multidoc import YAMLStream
+from strictyaml.multidoc import YAMLDocument
+from strictyaml.multidoc import DocumentFailure
+
 # Document builder
 from strictyaml.parser import as_document
 
@@ -43,6 +49,7 @@ from strictyaml.ruamel import YAMLError
 # Exceptions
 from strictyaml.exceptions import StrictYAMLError
 from strictyaml.exceptions import YAMLValidationError
+from strictyaml.exceptions import MultiDocumentError
 
 # Disallowed token exceptions
 from strictyaml.exceptions import DisallowedToken

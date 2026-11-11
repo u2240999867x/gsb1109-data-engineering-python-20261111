@@ -28,6 +28,7 @@ class YAMLChunk(object):
         label=None,
         strictparsed=None,
         key_association=None,
+        line_offset=0,
     ):
         self._ruamelparsed = ruamelparsed
         self._strictparsed = (
@@ -39,6 +40,11 @@ class YAMLChunk(object):
         # Associates strictparsed key names with ruamelparsed key names
         # E.g. "my-key-name" -> "My Key name"
         self._key_association = {} if key_association is None else key_association
+
+        # Number of lines preceding this chunk in the original YAML stream.
+        # Used when a chunk is one document within a multi-document stream so
+        # that error line numbers refer to the original stream location.
+        self._line_offset = line_offset
 
     def expecting_but_found(self, expecting, found=None):
         raise YAMLValidationError(
@@ -131,6 +137,10 @@ class YAMLChunk(object):
         return self._label
 
     @property
+    def line_offset(self):
+        return self._line_offset
+
+    @property
     def whole_document(self):
         return self._ruamelparsed
 
@@ -150,6 +160,7 @@ class YAMLChunk(object):
             pointer=self.pointer,
             label=self.label,
             key_association=copy(self._key_association),
+            line_offset=self._line_offset,
         )
         if self.is_scalar():
             # Necessary for e.g. EmptyDict, which reports as a scalar.
@@ -194,6 +205,7 @@ class YAMLChunk(object):
             label=self._label,
             strictparsed=self._strictparsed,
             key_association=copy(self._key_association),
+            line_offset=self._line_offset,
         )
 
     def index(self, strictindex):

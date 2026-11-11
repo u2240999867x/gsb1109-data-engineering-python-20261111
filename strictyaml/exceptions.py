@@ -24,6 +24,12 @@ class CannotBuildDocumentsFromEmptyDictOrList(StrictYAMLError):
     pass
 
 
+class MultiDocumentError(StrictYAMLError):
+    """Raised when a multi-document YAML stream cannot be read as configured."""
+
+    pass
+
+
 class YAMLSerializationError(StrictYAMLError):
     pass
 
@@ -38,6 +44,8 @@ class YAMLValidationError(StrictYAMLError):
         self.problem = problem
         self._chunk = chunk
         self.note = None
+        self.document_index = None
+        self.document_label = None
 
     @property
     def context_mark(self):
@@ -47,7 +55,7 @@ class YAMLValidationError(StrictYAMLError):
         return StringMark(
             self._chunk.label,
             context_index,
-            context_line,
+            context_line + self._chunk.line_offset,
             0,
             str_document,
             context_index + 1,
@@ -61,7 +69,7 @@ class YAMLValidationError(StrictYAMLError):
         return StringMark(
             self._chunk.label,
             problem_index,
-            problem_line,
+            problem_line + self._chunk.line_offset,
             0,
             str_document,
             problem_index + 1,

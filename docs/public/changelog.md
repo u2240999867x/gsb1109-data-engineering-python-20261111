@@ -3,6 +3,7 @@
 
 ### Latest
 
+* FEATURE : load_all reads multi-document YAML streams with a schema and label per document, document-aware error locations and an explicit continue_on_errors choice. load/dirty_load remain single-document only.
 * BUGFIX : Fully parse URL, fix #141
 
 
