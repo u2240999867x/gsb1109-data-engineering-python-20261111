@@ -2,13 +2,18 @@ import itertools
 import heapq
 import collections
 import operator
+import os
+import pickle
+import shutil
+import tempfile
 from functools import partial
 from itertools import filterfalse, zip_longest
 from collections.abc import Sequence
 from toolz.utils import no_default
 
 
-__all__ = ('remove', 'accumulate', 'groupby', 'merge_sorted', 'interleave',
+__all__ = ('remove', 'accumulate', 'groupby', 'groupby_spill', 'SpillError',
+           'merge_sorted', 'interleave',
            'unique', 'isiterable', 'isdistinct', 'take', 'drop', 'take_nth',
            'first', 'second', 'nth', 'last', 'get', 'concat', 'concatv',
            'mapcat', 'cons', 'interpose', 'frequencies', 'reduceby', 'iterate',
@@ -102,6 +107,295 @@ def groupby(key, seq):
     for k, v in d.items():
         rv[k] = v.__self__
     return rv
+
+
+class SpillError(Exception):
+    """ Raised when a spilling ``groupby_spill`` cannot finish
+
+    The grouping is never partially returned: when the spill budget is
+    exhausted the staging area is cleaned up and this error is raised, so
+    callers cannot mistake an incomplete grouping for a complete one.
+
+    Attributes:
+        consumed: number of input items consumed before the failure
+        path:     staging directory that was in use (its spilled files are
+                  already removed; the directory itself is kept when it was
+                  supplied by the caller)
+    """
+    def __init__(self, message):
+        super().__init__(message)
+        self.consumed = 0
+        self.path = None
+
+
+class _SpilledGroups:
+    """ Mapping-like view of a grouping kept partly on disk
+
+    Keys are exposed in first-seen order and each group in its original
+    order.  Disk-backed groups are re-read from the staging directory on
+    every access; call ``close`` (or use the object as a context manager)
+    to remove the staging data.
+    """
+    def __init__(self, key_order, in_memory, spilled, dirpath, own_dir):
+        self._key_order = key_order
+        self._in_memory = in_memory
+        self._spilled = spilled
+        self._dirpath = dirpath
+        self._own_dir = own_dir
+        self._closed = False
+
+    @property
+    def path(self):
+        """ Directory holding the spilled group files """
+        return self._dirpath
+
+    @property
+    def closed(self):
+        return self._closed
+
+    @property
+    def spilled_keys(self):
+        """ Keys whose groups are stored on disk """
+        return [k for k in self._key_order if k in self._spilled]
+
+    @property
+    def in_memory_keys(self):
+        """ Keys whose groups are held in memory """
+        return [k for k in self._key_order if k not in self._spilled]
+
+    def _ensure_open(self):
+        if self._closed:
+            raise ValueError('grouping is closed; its staging area has been '
+                             'removed')
+
+    def _part_path(self, index):
+        return os.path.join(self._dirpath, 'group-%08d.part' % index)
+
+    def __len__(self):
+        return len(self._key_order)
+
+    def __iter__(self):
+        return iter(self._key_order)
+
+    def __contains__(self, key):
+        return key in self._spilled or key in self._in_memory
+
+    def __getitem__(self, key):
+        self._ensure_open()
+        if key in self._in_memory:
+            return self._in_memory[key]
+        index = self._spilled[key]
+        items = []
+        with open(self._part_path(index), 'rb') as f:
+            while True:
+                try:
+                    items.extend(pickle.load(f))
+                except EOFError:
+                    break
+        return items
+
+    def get(self, key, default=None):
+        if key not in self:
+            return default
+        return self[key]
+
+    def keys(self):
+        return list(self._key_order)
+
+    def values(self):
+        return [self[key] for key in self._key_order]
+
+    def items(self):
+        return [(key, self[key]) for key in self._key_order]
+
+    def __eq__(self, other):
+        if isinstance(other, _SpilledGroups):
+            other = {key: other[key] for key in other._key_order}
+        if isinstance(other, dict):
+            return {key: self[key] for key in self._key_order} == other
+        return NotImplemented
+
+    def close(self):
+        """ Remove the staging data; safe to call more than once
+
+        A directory owned by the grouping (the default) is removed whole.
+        When ``dir`` was supplied by the caller only the spilled group
+        files are deleted, leaving that directory itself in place.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self._dirpath is None:
+            return
+        if self._own_dir:
+            shutil.rmtree(self._dirpath, ignore_errors=True)
+        else:
+            for index in self._spilled.values():
+                try:
+                    os.remove(self._part_path(index))
+                except FileNotFoundError:
+                    pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def groupby_spill(key, seq, dir=None, max_in_memory=1024,
+                  max_spill_bytes=None):
+    """ Group a collection by a key function, spilling groups to disk
+
+    A streaming alternative to :func:`groupby` for collections that do not
+    fit in memory.  The input is consumed in a single pass with no sorting,
+    so it need not be ordered by key.  Groups grow in memory buffers; once
+    ``max_in_memory`` items are buffered the largest buffer is pickled into
+    a staging directory and freed.  Keys keep their first-seen order and the
+    items within every group keep their original order.
+
+    Set ``max_in_memory=None`` to disable spilling and keep every group in
+    memory; ``max_spill_bytes`` bounds the total size of the pickled spill
+    files (the default, ``None``, is unbounded).
+
+    >>> import os, tempfile
+    >>> iseven = lambda x: x % 2 == 0
+    >>> with tempfile.TemporaryDirectory() as staging:
+    ...     groups = groupby_spill(iseven, [1, 2, 1, 4, 3, 2, 5],
+    ...                            dir=staging, max_in_memory=2)
+    ...     print(list(groups))
+    ...     print(groups[False])
+    ...     print(groups[True])
+    ...     groups.close()
+    [False, True]
+    [1, 1, 3, 5]
+    [2, 4, 2]
+
+    The result is a mapping-like view that re-reads spilled groups from
+    disk.  It works as a context manager and deletes its staging area on
+    ``close`` (including when it is garbage collected).  With ``dir`` unset
+    a private staging directory is created on the first spill and removed
+    by ``close``; a caller-supplied ``dir`` is kept but its group files are
+    deleted.  If the optional ``max_spill_bytes`` budget is exhausted a
+    :class:`SpillError` is raised and the staging data is removed rather
+    than returning partial groups.
+
+    >>> with tempfile.TemporaryDirectory() as staging:
+    ...     try:
+    ...         groupby_spill(iseven, range(100), dir=staging,
+    ...                       max_in_memory=1, max_spill_bytes=10)
+    ...     except SpillError as err:
+    ...         print(type(err.consumed).__name__, os.path.exists(staging))
+    int True
+
+    Non-callable keys imply grouping on a member, just like ``groupby``.
+
+    See Also:
+        groupby
+        reduceby
+    """
+    if not callable(key):
+        key = getter(key)
+    if max_in_memory is not None and max_in_memory < 0:
+        raise ValueError('max_in_memory must be non-negative')
+    if max_spill_bytes is not None and max_spill_bytes < 0:
+        raise ValueError('max_spill_bytes must be non-negative')
+
+    own_dir = dir is None
+    dirpath = None
+
+    def ensure_dir():
+        nonlocal dirpath
+        if dirpath is None:
+            if own_dir:
+                dirpath = tempfile.mkdtemp(prefix='toolz-groupby-')
+            else:
+                os.makedirs(dir, exist_ok=True)
+                dirpath = dir
+        return dirpath
+
+    def part_path(index):
+        return os.path.join(dirpath, 'group-%08d.part' % index)
+
+    key_order = []
+    buffers = {}
+    spilled = {}
+    buffered_count = 0
+    spill_bytes = 0
+    consumed = 0
+
+    def cleanup():
+        if dirpath is None:
+            return
+        if own_dir:
+            shutil.rmtree(dirpath, ignore_errors=True)
+        else:
+            for index in spilled.values():
+                try:
+                    os.remove(part_path(index))
+                except FileNotFoundError:
+                    pass
+
+    def flush_buffer(group_key):
+        nonlocal buffered_count, spill_bytes
+        buf = buffers[group_key]
+        if not buf:
+            return
+        ensure_dir()
+        payload = pickle.dumps(buf)
+        if (max_spill_bytes is not None
+                and spill_bytes + len(payload) > max_spill_bytes):
+            cleanup()
+            err = SpillError(
+                'spill budget of %d bytes exceeded after %d item(s); '
+                'grouping is incomplete and staging data in %r was removed'
+                % (max_spill_bytes, consumed, dirpath))
+            err.consumed = consumed
+            err.path = dirpath
+            raise err
+        index = spilled.get(group_key)
+        if index is None:
+            index = len(spilled)
+            spilled[group_key] = index
+        with open(part_path(index), 'ab') as f:
+            f.write(payload)
+        spill_bytes += len(payload)
+        buffered_count -= len(buf)
+        buf.clear()
+
+    try:
+        for item in seq:
+            group_key = key(item)
+            buf = buffers.get(group_key)
+            if buf is None:
+                buf = []
+                buffers[group_key] = buf
+                key_order.append(group_key)
+            buf.append(item)
+            buffered_count += 1
+            consumed += 1
+            if (max_in_memory is not None
+                    and buffered_count > max_in_memory):
+                victim = max(buffers, key=lambda k: len(buffers[k]))
+                flush_buffer(victim)
+
+        for group_key in spilled:
+            flush_buffer(group_key)
+    except SpillError:
+        raise
+    except Exception:
+        cleanup()
+        raise
+
+    in_memory = {group_key: buffers[group_key]
+                 for group_key in key_order if group_key not in spilled}
+    return _SpilledGroups(key_order, in_memory, spilled, dirpath, own_dir)
 
 
 def merge_sorted(*seqs, **kwargs):

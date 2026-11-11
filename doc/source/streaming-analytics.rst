@@ -109,6 +109,13 @@ The ``groupby`` function collects the entire dataset in memory into a
 dictionary.  While convenient, the ``groupby`` operation is *not streaming* and
 so this approach is limited to datasets that can fit comfortably into memory.
 
+When the full grouping still has to be materialized but it does not fit in
+memory, `groupby_spill`_ offers the same one-pass grouping while buffering
+groups to a temporary directory on disk.  The input does not need to be sorted
+by key; keys keep their first-seen order and each group keeps its original
+order.  If the on-disk budget is exhausted the staging data is cleaned up and
+a ``SpillError`` is raised instead of returning an incomplete grouping.
+
 Toolz achieves streaming split-apply-combine with `reduceby`_, a function that
 performs a simultaneous reduction on each group as the elements stream in.  To
 understand this section you should first be familiar with the builtin function
@@ -309,6 +316,7 @@ using projects specific to data analytics like Pandas_ or SQLAlchemy.
 
 
 .. _groupby: https://toolz.readthedocs.io/en/latest/api.html#toolz.itertoolz.groupby
+.. _groupby_spill: https://toolz.readthedocs.io/en/latest/api.html#toolz.itertoolz.groupby_spill
 .. _join: https://toolz.readthedocs.io/en/latest/api.html#toolz.itertoolz.join
 .. _reduceby: https://toolz.readthedocs.io/en/latest/api.html#toolz.itertoolz.reduceby
 .. _valmap: https://toolz.readthedocs.io/en/latest/api.html#toolz.dicttoolz.valmap

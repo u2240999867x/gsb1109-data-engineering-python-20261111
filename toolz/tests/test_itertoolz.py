@@ -1,10 +1,14 @@
+import gc
 import itertools
+import os
+import tempfile
 from itertools import starmap
 from toolz.utils import raises
 from functools import partial
 from random import Random
 from pickle import dumps, loads
-from toolz.itertoolz import (remove, groupby, merge_sorted,
+from toolz.itertoolz import (remove, groupby, groupby_spill, SpillError,
+                             merge_sorted,
                              concat, concatv, interleave, unique,
                              isiterable, getter,
                              mapcat, isdistinct, first, second,
@@ -63,6 +67,160 @@ def test_groupby_non_callable():
     assert groupby([0, 0], [(1, 2), (1, 3), (2, 2), (2, 4)]) == \
         {(1, 1): [(1, 2), (1, 3)],
          (2, 2): [(2, 2), (2, 4)]}
+
+
+def test_groupby_spill_matches_groupby():
+    data = [('b', 1), ('a', 2), ('b', 3), ('c', 4),
+            ('a', 5), ('b', 6), ('c', 7), ('a', 8)]
+    expected = groupby(0, data)
+    for max_in_memory in (1, 2, 3, 8, 100):
+        groups = groupby_spill(0, iter(data), max_in_memory=max_in_memory)
+        # first-seen key order, input is not sorted by key
+        assert list(groups) == ['b', 'a', 'c']
+        assert groups.keys() == ['b', 'a', 'c']
+        assert dict(groups.items()) == expected
+        # within-group original order is preserved across spills
+        assert groups['a'] == [('a', 2), ('a', 5), ('a', 8)]
+        assert groups['b'] == [('b', 1), ('b', 3), ('b', 6)]
+        assert len(groups) == 3
+        assert 'a' in groups and 'z' not in groups
+        assert groups.get('z') is None
+        assert groups == expected
+        groups.close()
+
+
+def test_groupby_spill_non_callable():
+    data = [{'account': 'x', 'n': 1}, {'account': 'y', 'n': 2},
+            {'account': 'x', 'n': 3}]
+    with tempfile.TemporaryDirectory() as staging:
+        groups = groupby_spill('account', data, dir=staging,
+                               max_in_memory=1)
+        assert list(groups) == ['x', 'y']
+        assert groups['x'] == [data[0], data[2]]
+        assert groups['y'] == [data[1]]
+        groups.close()
+
+
+def test_groupby_spill_no_spill_uses_no_staging():
+    data = [1, 2, 3, 4]
+    groups = groupby_spill(iseven, data, max_in_memory=100)
+    assert groups.path is None
+    assert groups.spilled_keys == []
+    assert groups.in_memory_keys == [False, True]
+    assert groups == groupby(iseven, data)
+    groups.close()
+    assert groups.closed
+    # closing without any staging data is harmless and repeatable
+    groups.close()
+
+
+def test_groupby_spill_owns_and_removes_temp_dir():
+    groups = groupby_spill(iseven, range(30), max_in_memory=2)
+    path = groups.path
+    assert os.path.isdir(path)
+    assert groups.spilled_keys
+    groups.close()
+    assert not os.path.exists(path)
+    assert raises(ValueError, lambda: groups[True])
+
+
+def test_groupby_spill_context_manager():
+    with groupby_spill(iseven, range(30), max_in_memory=2) as groups:
+        path = groups.path
+        assert os.path.isdir(path)
+        assert groups[True] == list(range(0, 30, 2))
+    assert not os.path.exists(path)
+
+
+def test_groupby_spill_gc_cleans_temp_dir():
+    groups = groupby_spill(iseven, range(20), max_in_memory=2)
+    path = groups.path
+    assert os.path.isdir(path)
+    del groups
+    gc.collect()
+    assert not os.path.exists(path)
+
+
+def test_groupby_spill_caller_dir_kept_but_parts_removed():
+    with tempfile.TemporaryDirectory() as staging:
+        groups = groupby_spill(iseven, range(40), dir=staging,
+                               max_in_memory=2)
+        assert os.path.isdir(staging)
+        assert groups.path == staging
+        assert any(f.endswith('.part') for f in os.listdir(staging))
+        groups.close()
+        assert os.path.isdir(staging)
+        assert not any(f.endswith('.part') for f in os.listdir(staging))
+        # the caller's own directory is not removed on close
+        groups.close()
+
+
+def test_groupby_spill_budget_failure_cleans_up():
+    with tempfile.TemporaryDirectory() as staging:
+        try:
+            groupby_spill(iseven, range(100), dir=staging,
+                          max_in_memory=1, max_spill_bytes=5)
+        except SpillError as err:
+            assert err.consumed >= 1
+            assert err.path == staging
+            assert not any(f.endswith('.part') for f in os.listdir(staging))
+        else:
+            raise AssertionError('SpillError was not raised')
+
+    # default temp directory is removed entirely on budget failure
+    try:
+        groupby_spill(iseven, range(100), max_in_memory=1,
+                      max_spill_bytes=5)
+    except SpillError as err:
+        assert not os.path.exists(err.path)
+    else:
+        raise AssertionError('SpillError was not raised')
+
+
+def test_groupby_spill_failure_during_input_cleans_up():
+    def flaky_key(value):
+        if value == 7:
+            raise RuntimeError('key failure')
+        return value % 2
+
+    try:
+        groupby_spill(flaky_key, range(10), max_in_memory=2)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('RuntimeError was not raised')
+
+    leftovers = [name for name in os.listdir(tempfile.gettempdir())
+                 if name.startswith('toolz-groupby-')]
+    assert leftovers == []
+
+
+def test_groupby_spill_invalid_arguments():
+    assert raises(ValueError,
+                  lambda: groupby_spill(iseven, [], max_in_memory=-1))
+    assert raises(ValueError,
+                  lambda: groupby_spill(iseven, [], max_spill_bytes=-1))
+
+
+def test_groupby_spill_disabled_keeps_everything_in_memory():
+    data = list(range(50))
+    groups = groupby_spill(iseven, data, max_in_memory=None)
+    assert groups.path is None
+    assert groups.spilled_keys == []
+    assert groups == groupby(iseven, data)
+    groups.close()
+
+
+def test_groupby_spill_accepts_generator():
+    def gen():
+        for value in [2, 1, 4, 3, 6, 5, 2]:
+            yield value
+
+    groups = groupby_spill(iseven, gen(), max_in_memory=2)
+    assert list(groups) == [True, False]
+    assert groups[True] == [2, 4, 6, 2]
+    assert groups[False] == [1, 3, 5]
+    groups.close()
 
 
 def test_merge_sorted():

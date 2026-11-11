@@ -21,6 +21,7 @@ Itertoolz
    frequencies
    get
    groupby
+   groupby_spill
    interleave
    interpose
    isdistinct
