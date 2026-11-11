@@ -6,6 +6,7 @@ More complex cases require converter customization (since there are many ways of
 _cattrs_ also comes with a number of optional strategies to help handle unions:
 
 - [tagged unions strategy](strategies.md#tagged-unions-strategy) mentioned below
+- [predicate union strategy](strategies.md#predicate-union-strategy), which disambiguates from declared markers without trying member hooks in turn
 - [union passthrough strategy](strategies.md#union-passthrough), which is preapplied to all the [preconfigured](preconf.md) converters
 
 ## Default Union Strategy

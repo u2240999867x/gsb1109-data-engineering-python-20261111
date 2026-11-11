@@ -186,6 +186,22 @@ class MultiStrategyDispatch(Generic[Hook]):
     def get_num_fns(self) -> int:
         return self._function_dispatch.get_num_fns()
 
+    def peek_cached(self, typ: TargetType) -> Callable[..., Any] | None:
+        """Return a hook already registered for ``typ`` without generating one.
+
+        Unlike :meth:`dispatch`, this never runs a hook factory or the
+        fallback factory, so observing a type through this method has no side
+        effects. Hooks produced lazily by function-dispatch factories are not
+        exposed; only explicitly registered (single or direct) hooks are.
+        """
+        try:
+            handler = self._single_dispatch.dispatch(typ)
+            if handler is not _DispatchNotFound:
+                return handler
+        except Exception:  # noqa: S110
+            pass
+        return self._direct_dispatch.get(typ)
+
     def copy_to(self, other: MultiStrategyDispatch, skip: int = 0) -> None:
         self._function_dispatch.copy_to(other._function_dispatch, skip=skip)
         for cls, fn in self._single_dispatch.registry.items():

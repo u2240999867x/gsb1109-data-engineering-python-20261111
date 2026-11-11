@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import MISSING
 from functools import reduce
 from operator import or_
-from typing import TYPE_CHECKING, Any, Callable, Literal, Union, get_origin
+from typing import TYPE_CHECKING, Any, Callable, Final, Literal, Union, get_origin
 
 from attrs import NOTHING, Attribute, AttrsInstance
 
@@ -20,12 +20,18 @@ from ._compat import (
     is_literal,
     is_union_type,
 )
+from .errors import (
+    AmbiguousUnionError,
+    UnionTagConflictError,
+    UnionTagMissingError,
+    UnionTagUnknownError,
+)
 from .gen import AttributeOverride
 
 if TYPE_CHECKING:
     from .converters import BaseConverter
 
-__all__ = ["create_default_dis_func", "is_supported_union"]
+__all__ = ["create_default_dis_func", "create_predicate_dis_func", "is_supported_union"]
 
 
 def is_supported_union(typ: Any) -> bool:
@@ -35,91 +41,110 @@ def is_supported_union(typ: Any) -> bool:
     )
 
 
-def create_default_dis_func(
+def _peek_overrides(converter: BaseConverter, cl: type[AttrsInstance]) -> dict:
+    """Read attribute overrides for ``cl`` without generating its hook."""
+    hook = converter.peek_structure_hook(cl)
+    overrides = dict(getattr(hook, "overrides", None) or {})
+
+    # Converter-level type overrides are otherwise only applied while a hook
+    # is being generated; incorporate them declaratively so renamed markers
+    # stay visible before any member hook exists.
+    type_overrides = getattr(converter, "type_overrides", None)
+    if type_overrides:
+        for at in adapted_fields(get_origin(cl) or cl):
+            if at.type in type_overrides and at.name not in overrides:
+                overrides[at.name] = type_overrides[at.type]
+    return overrides
+
+
+def _normalize_overrides(
     converter: BaseConverter,
-    *classes: type[AttrsInstance],
-    use_literals: bool = True,
+    classes: tuple[type[AttrsInstance], ...],
     overrides: (
         dict[str, AttributeOverride] | Literal["from_converter"]
     ) = "from_converter",
-) -> Callable[[Mapping[Any, Any]], type[Any] | None]:
-    """Given attrs classes or dataclasses, generate a disambiguation function.
+    peek: bool = False,
+) -> list[dict[str, AttributeOverride]]:
+    """Resolve the ``overrides`` argument into one override dict per class.
 
-    The function is based on unique fields without defaults or unique values.
-
-    :param use_literals: Whether to try using fields annotated as literals for
-        disambiguation.
-    :param overrides: Attribute overrides to apply.
-
-    .. versionchanged:: 24.1.0
-        Dataclasses are now supported.
-    .. versionchanged:: NEXT
-        Renaming overrides also apply to literal discriminator fields.
+    When ``peek`` is set, overrides are read only from hooks already
+    registered or generated, so no member hook factory is run as a side
+    effect. Otherwise the member hooks are materialized, matching the
+    historical behavior of the default disambiguation function.
     """
-    if len(classes) < 2:
-        raise ValueError("At least two classes required.")
-
     if overrides == "from_converter":
-        overrides = [
+        if peek:
+            return [_peek_overrides(converter, cl) for cl in classes]
+        return [
             getattr(converter.get_structure_hook(c), "overrides", {}) for c in classes
         ]
-    else:
-        overrides = [overrides for _ in classes]
+    return [overrides for _ in classes]
 
-    # first, attempt for unique values
-    if use_literals:
-        # requirements for a discriminator field:
-        # (... TODO: a single fallback is OK)
-        #  - it must always be enumerated
-        cls_candidates = [
-            {
-                _overriden_name(at, override.get(at.name)): at
-                for at in adapted_fields(get_origin(cl) or cl)
-                if is_literal(at.type)
-            }
-            for cl, override in zip(classes, overrides)
-        ]
 
-        # literal field names common to all members
-        discriminators: set[str] = set(cls_candidates[0])
-        for possible_discriminators in cls_candidates:
-            discriminators.intersection_update(possible_discriminators)
+def _build_literal_plan(
+    classes: tuple[type[AttrsInstance], ...],
+    overrides: list[dict[str, AttributeOverride]],
+) -> tuple[str, dict[Any, Any]] | None:
+    """Find the best literal discriminator field, if any.
 
-        best_result = None
-        best_discriminator = None
-        for discriminator in discriminators:
-            # maps Literal values (strings, ints...) to classes
-            mapping = defaultdict(list)
+    Returns the serialized discriminator name and a mapping of its literal
+    values to classes (or unions of classes for non-unique values).
+    """
+    # requirements for a discriminator field:
+    # (... TODO: a single fallback is OK)
+    #  - it must always be enumerated
+    cls_candidates = [
+        {
+            _overriden_name(at, override.get(at.name)): at
+            for at in adapted_fields(get_origin(cl) or cl)
+            if is_literal(at.type)
+        }
+        for cl, override in zip(classes, overrides)
+    ]
 
-            for cl, candidates in zip(classes, cls_candidates):
-                for key in get_args(candidates[discriminator].type):
-                    mapping[key].append(cl)
+    # literal field names common to all members
+    discriminators: set[str] = set(cls_candidates[0])
+    for possible_discriminators in cls_candidates:
+        discriminators.intersection_update(possible_discriminators)
 
-            if best_result is None or max(len(v) for v in mapping.values()) <= max(
-                len(v) for v in best_result.values()
-            ):
-                best_result = mapping
-                best_discriminator = discriminator
+    best_result = None
+    best_discriminator = None
+    for discriminator in discriminators:
+        # maps Literal values (strings, ints...) to classes
+        mapping = defaultdict(list)
 
-        if (
-            best_result
-            and best_discriminator is not None
-            and max(len(v) for v in best_result.values()) != len(classes)
+        for cl, candidates in zip(classes, cls_candidates):
+            for key in get_args(candidates[discriminator].type):
+                mapping[key].append(cl)
+
+        if best_result is None or max(len(v) for v in mapping.values()) <= max(
+            len(v) for v in best_result.values()
         ):
-            final_mapping = {
-                k: v[0] if len(v) == 1 else Union[tuple(v)]
-                for k, v in best_result.items()
-            }
+            best_result = mapping
+            best_discriminator = discriminator
 
-            def dis_func(data: Mapping[Any, Any]) -> type | None:
-                if not isinstance(data, Mapping):
-                    raise ValueError("Only input mappings are supported.")
-                return final_mapping[data[best_discriminator]]
+    if (
+        best_result
+        and best_discriminator is not None
+        and max(len(v) for v in best_result.values()) != len(classes)
+    ):
+        final_mapping = {
+            k: v[0] if len(v) == 1 else Union[tuple(v)] for k, v in best_result.items()
+        }
+        return best_discriminator, final_mapping
+    return None
 
-            return dis_func
 
-    # next, attempt for unique keys
+def _build_unique_field_plan(
+    classes: tuple[type[AttrsInstance], ...],
+    overrides: list[dict[str, AttributeOverride]],
+) -> tuple[dict[str, type], list[tuple[type, set[str], dict[str, str]]]]:
+    """Pin classes to unique required fields.
 
+    Returns the mapping of unique serialized field names to classes, together
+    with the entries that could not be pinned (zero or one of which may serve
+    as a fallback).
+    """
     # NOTE: This could just as well work with just field availability and not
     #  uniqueness, returning Unions ... it doesn't do that right now.
     cls_and_attrs = [
@@ -162,6 +187,51 @@ def create_default_dis_func(
                 still_remaining.append(entry)
         remaining = still_remaining
 
+    return uniq_attrs_dict, remaining
+
+
+def create_default_dis_func(
+    converter: BaseConverter,
+    *classes: type[AttrsInstance],
+    use_literals: bool = True,
+    overrides: (
+        dict[str, AttributeOverride] | Literal["from_converter"]
+    ) = "from_converter",
+) -> Callable[[Mapping[Any, Any]], type[Any] | None]:
+    """Given attrs classes or dataclasses, generate a disambiguation function.
+
+    The function is based on unique fields without defaults or unique values.
+
+    :param use_literals: Whether to try using fields annotated as literals for
+        disambiguation.
+    :param overrides: Attribute overrides to apply.
+
+    .. versionchanged:: 24.1.0
+        Dataclasses are now supported.
+    .. versionchanged:: NEXT
+        Renaming overrides also apply to literal discriminator fields.
+    """
+    if len(classes) < 2:
+        raise ValueError("At least two classes required.")
+
+    overrides_list = _normalize_overrides(converter, classes, overrides)
+
+    # first, attempt for unique values
+    if use_literals:
+        literal_plan = _build_literal_plan(classes, overrides_list)
+        if literal_plan is not None:
+            best_discriminator, final_mapping = literal_plan
+
+            def dis_func(data: Mapping[Any, Any]) -> type | None:
+                if not isinstance(data, Mapping):
+                    raise ValueError("Only input mappings are supported.")
+                return final_mapping[data[best_discriminator]]
+
+            return dis_func
+
+    # next, attempt for unique keys
+    uniq_attrs_dict, remaining = _build_unique_field_plan(classes, overrides_list)
+
     # A class we could not pin to a unique non-default field can only be the
     # single fallback (tried when no unique key matches). More than one such
     # class is a genuine ambiguity.
@@ -192,6 +262,101 @@ def create_default_dis_func(
                 if k in data:
                     return v
             return fallback
+
+    return dis_func
+
+
+#: Sentinel used to tell "key absent" apart from real payload values.
+_NO_TAG: Final = object()
+
+
+def create_predicate_dis_func(
+    converter: BaseConverter,
+    *classes: type[AttrsInstance],
+    use_literals: bool = True,
+    overrides: (
+        dict[str, AttributeOverride] | Literal["from_converter"]
+    ) = "from_converter",
+) -> Callable[[Mapping[Any, Any]], type[Any]]:
+    """Generate a purely declarative disambiguation function.
+
+    Unlike trying every member structure hook in turn, this function only
+    inspects the payload against the declared type markers -- literal
+    discriminator fields and mutually exclusive required fields -- and never
+    invokes a structure hook, so failed candidates have no side effects.
+
+    The returned function resolves to exactly one member class, or raises a
+    subclass of :class:`~cattrs.errors.UnionDisambiguationError`:
+
+    * :class:`~cattrs.errors.UnionTagMissingError` when no declared tag is
+      present,
+    * :class:`~cattrs.errors.UnionTagUnknownError` when the tag value matches
+      no member,
+    * :class:`~cattrs.errors.UnionTagConflictError` when several members claim
+      the tag value (a conflict, kept separate from a missing tag),
+    * :class:`~cattrs.errors.AmbiguousUnionError` when the markers cannot narrow
+      the payload down to a single member.
+
+    :param use_literals: Whether to try using fields annotated as literals for
+        disambiguation.
+    :param overrides: Attribute overrides to apply.
+
+    .. versionadded:: NEXT
+    """
+    if len(classes) < 2:
+        raise ValueError("At least two classes required.")
+
+    overrides_list = _normalize_overrides(converter, classes, overrides, peek=True)
+    union_type = Union[tuple(classes)]
+
+    literal_plan = (
+        _build_literal_plan(classes, overrides_list) if use_literals else None
+    )
+    uniq_attrs_dict, remaining = _build_unique_field_plan(classes, overrides_list)
+    unpinned = tuple(entry[0] for entry in remaining)
+
+    def dis_func(data: Mapping[Any, Any]) -> type[Any]:
+        if not isinstance(data, Mapping):
+            raise ValueError("Only input mappings are supported.")
+
+        if literal_plan is not None:
+            discriminator, mapping = literal_plan
+            tag_value = data.get(discriminator, _NO_TAG)
+            if tag_value is _NO_TAG:
+                raise UnionTagMissingError(union_type, classes, data, tuple(mapping))
+
+            target = mapping.get(tag_value, _NO_TAG)
+            if target is _NO_TAG:
+                raise UnionTagUnknownError(
+                    union_type, classes, data, discriminator, tag_value
+                )
+
+            if is_union_type(target):
+                conflict_members = get_args(target)
+                raise UnionTagConflictError(
+                    union_type,
+                    conflict_members,
+                    data,
+                    tuple((tag_value, member) for member in conflict_members),
+                )
+            return target
+
+        present = [
+            (field_name, cl)
+            for field_name, cl in uniq_attrs_dict.items()
+            if field_name in data
+        ]
+
+        if len(present) == 1:
+            return present[0][1]
+        if len(present) > 1:
+            candidates = tuple(dict.fromkeys(cl for _, cl in present))
+            raise AmbiguousUnionError(union_type, candidates, data)
+
+        # No unique marker is present; a single unpinned class is the fallback.
+        if len(unpinned) == 1:
+            return unpinned[0]
+        raise AmbiguousUnionError(union_type, unpinned or classes, data)
 
     return dis_func
 

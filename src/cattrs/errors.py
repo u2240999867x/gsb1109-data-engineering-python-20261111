@@ -140,3 +140,127 @@ class ForbiddenExtraKeysError(CattrsError):
             or f"Extra fields in constructor for {self.cl.__name__}: "
             f"{', '.join(sorted(self.extra_fields))}"
         )
+
+
+class UnionDisambiguationError(CattrsError):
+    """Base class for errors raised while disambiguating a union without
+    trying the member structure hooks.
+
+    :param union: The union that could not be disambiguated.
+    :param candidates: The union members still considered when the error was
+        raised.
+    :param payload: The raw payload that could not be disambiguated.
+
+    .. versionadded:: NEXT
+    """
+
+    def __init__(self, union: Any, candidates: tuple[Any, ...], payload: Any) -> None:
+        self.union = union
+        self.candidates = tuple(candidates)
+        self.payload = payload
+        super().__init__(union, self.candidates, payload)
+
+    @staticmethod
+    def _format_candidates(candidates: tuple[Any, ...]) -> str:
+        return ", ".join(getattr(c, "__name__", repr(c)) for c in candidates)
+
+
+class UnionTagMissingError(UnionDisambiguationError):
+    """Raised when a payload carries none of the declared tag values.
+
+    This is distinct from a tag conflict: the payload does not contain a tag
+    value matching any union member, rather than containing several of them.
+
+    .. versionadded:: NEXT
+    """
+
+    def __init__(
+        self,
+        union: Any,
+        candidates: tuple[Any, ...],
+        payload: Any,
+        tag_values: tuple[Any, ...],
+    ) -> None:
+        self.tag_values = tuple(tag_values)
+        super().__init__(union, candidates, payload)
+
+    def __str__(self) -> str:
+        return (
+            f"No union tag found for {self.union}; expected one of "
+            f"{list(self.tag_values)} among candidates "
+            f"{self._format_candidates(self.candidates)}"
+        )
+
+
+class UnionTagConflictError(UnionDisambiguationError):
+    """Raised when a payload matches the tag values of more than one member.
+
+    A conflict means the payload contains *several* declared tags at once;
+    a missing tag raises :class:`UnionTagMissingError` instead.
+
+    :param matches: The tag values present in the payload, paired with the
+        members declaring them.
+
+    .. versionadded:: NEXT
+    """
+
+    def __init__(
+        self,
+        union: Any,
+        candidates: tuple[Any, ...],
+        payload: Any,
+        matches: tuple[tuple[Any, Any], ...],
+    ) -> None:
+        self.matches = tuple(matches)
+        super().__init__(union, candidates, payload)
+
+    def __str__(self) -> str:
+        rendered = ", ".join(
+            f"{value!r} -> {member.__name__}" for value, member in self.matches
+        )
+        return (
+            f"Conflicting union tags in payload for {self.union}: {rendered}; "
+            f"candidates narrowed to {self._format_candidates(self.candidates)}"
+        )
+
+
+class UnionTagUnknownError(UnionDisambiguationError):
+    """Raised when a tag field is present but its value matches no member.
+
+    .. versionadded:: NEXT
+    """
+
+    def __init__(
+        self,
+        union: Any,
+        candidates: tuple[Any, ...],
+        payload: Any,
+        tag_name: str,
+        tag_value: Any,
+    ) -> None:
+        self.tag_name = tag_name
+        self.tag_value = tag_value
+        super().__init__(union, candidates, payload)
+
+    def __str__(self) -> str:
+        return (
+            f"Unknown union tag {self.tag_value!r} in field {self.tag_name!r} "
+            f"for {self.union}; candidates: "
+            f"{self._format_candidates(self.candidates)}"
+        )
+
+
+class AmbiguousUnionError(UnionDisambiguationError):
+    """Raised when the declared markers leave more than one candidate.
+
+    The markers could be examined without side effects, but they do not identify
+    a single union member, so no member structure hook is invoked.
+
+    .. versionadded:: NEXT
+    """
+
+    def __str__(self) -> str:
+        return (
+            f"Could not uniquely disambiguate {self.union}; remaining candidates: "
+            f"{self._format_candidates(self.candidates)}"
+        )

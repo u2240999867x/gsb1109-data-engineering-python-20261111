@@ -10,8 +10,18 @@ from attrs import NOTHING, asdict, define, field, fields
 from hypothesis import HealthCheck, assume, given, settings
 
 from cattrs import Converter
-from cattrs.disambiguators import create_default_dis_func, is_supported_union
-from cattrs.errors import StructureHandlerNotFoundError
+from cattrs.disambiguators import (
+    create_default_dis_func,
+    create_predicate_dis_func,
+    is_supported_union,
+)
+from cattrs.errors import (
+    AmbiguousUnionError,
+    StructureHandlerNotFoundError,
+    UnionTagConflictError,
+    UnionTagMissingError,
+    UnionTagUnknownError,
+)
 from cattrs.gen import make_dict_structure_fn, make_dict_unstructure_fn, override
 
 from .untyped import simple_classes
@@ -495,3 +505,181 @@ def test_dataclasses_literals(converter):
 
     assert converter.structure({"a": "a"}, Union[A, B]) == A()
     assert converter.structure({"b": "b"}, Union[A, B]) == B("b")
+
+
+def test_predicate_dis_func_literal_markers():
+    """Literal markers uniquely identify members."""
+    c = Converter()
+
+    @define
+    class A:
+        kind: Literal["a"]
+
+    @define
+    class B:
+        kind: Literal["b"]
+
+    fn = create_predicate_dis_func(c, A, B)
+    assert fn({"kind": "a"}) is A
+    assert fn({"kind": "b"}) is B
+
+
+def test_predicate_dis_func_missing_vs_unknown_vs_conflict():
+    """Tag problems are reported as distinct, specific errors."""
+    c = Converter()
+
+    @define
+    class H:
+        a: Literal[1]
+
+    @define
+    class J:
+        a: Literal[0, 1]
+
+    @define
+    class K:
+        a: Literal[0]
+
+    fn = create_predicate_dis_func(c, H, J, K)
+
+    with pytest.raises(UnionTagMissingError) as missing:
+        fn({})
+    assert set(missing.value.tag_values) == {0, 1}
+
+    with pytest.raises(UnionTagUnknownError) as unknown:
+        fn({"a": 99})
+    assert unknown.value.tag_name == "a"
+    assert unknown.value.tag_value == 99
+
+    with pytest.raises(UnionTagConflictError) as conflict:
+        fn({"a": 1})
+    assert set(conflict.value.candidates) == {H, J}
+
+
+def test_predicate_dis_func_unique_fields_and_fallback():
+    """Mutually exclusive fields pin members; one class may be fallback."""
+    c = Converter()
+
+    @define
+    class P:
+        p: int
+
+    @define
+    class Q:
+        q: int
+
+    @define
+    class R:
+        pass
+
+    fn = create_predicate_dis_func(c, P, Q, R)
+    assert fn({"p": 1}) is P
+    assert fn({"q": 2}) is Q
+    assert fn({}) is R
+
+    with pytest.raises(AmbiguousUnionError) as exc:
+        fn({"p": 1, "q": 2})
+    assert set(exc.value.candidates) == {P, Q}
+
+
+def test_predicate_dis_func_ambiguity_without_fallback():
+    """No marker and no fallback class is an ambiguity rather than a miss."""
+    c = Converter()
+
+    @define
+    class P:
+        p: int
+
+    @define
+    class Q:
+        q: int
+
+    fn = create_predicate_dis_func(c, P, Q)
+    with pytest.raises(AmbiguousUnionError) as exc:
+        fn({})
+    assert set(exc.value.candidates) == {P, Q}
+
+
+def test_predicate_dis_func_has_no_factory_side_effects():
+    """Building and running the predicate never generates a member hook."""
+    c = Converter()
+    generated = []
+
+    @define
+    class P:
+        p: int
+
+    @define
+    class Q:
+        q: int
+
+    def factory(cl):
+        generated.append(cl)
+
+        def hook(val, _cl=cl):
+            return _cl(val[next(iter(val))])
+
+        return hook
+
+    c.register_structure_hook_factory(lambda t: t in (P, Q), factory)
+
+    fn = create_predicate_dis_func(c, P, Q)
+    assert generated == []
+
+    assert fn({"p": 1}) is P
+    assert fn({"q": 2}) is Q
+    with pytest.raises(AmbiguousUnionError):
+        fn({})
+    assert generated == []
+
+
+def test_peek_structure_hook_does_not_generate():
+    """Peeking returns registered hooks without generating missing ones."""
+    c = Converter()
+
+    @define
+    class P:
+        p: int
+
+    @define
+    class Q:
+        q: int
+
+    def hook(val, _cl=Q):
+        return _cl(val["q"])
+
+    c.register_structure_hook(Q, hook)
+
+    assert c.peek_structure_hook(P) is None
+    assert c.peek_structure_hook(Q) is hook
+    # Peeking did not materialize a hook for P.
+    assert c.peek_structure_hook(P) is None
+
+
+def test_predicate_dis_func_requires_two_classes():
+    """A single class cannot be disambiguated."""
+    c = Converter()
+
+    @define
+    class A:
+        a: int
+
+    with pytest.raises(ValueError):
+        create_predicate_dis_func(c, A)
+
+
+def test_predicate_dis_func_non_mapping():
+    """Non-mapping payloads raise a ValueError."""
+    c = Converter()
+
+    @define
+    class P:
+        p: int
+
+    @define
+    class Q:
+        q: int
+
+    fn = create_predicate_dis_func(c, P, Q)
+    with pytest.raises(ValueError):
+        fn(("p", 1))

@@ -662,6 +662,20 @@ class BaseConverter:
             else self._structure_func.dispatch_without_caching(type)
         )
 
+    def peek_structure_hook(self, type: Any) -> StructureHook | None:
+        """Return the structure hook already registered for ``type``, if any.
+
+        Unlike :meth:`get_structure_hook`, this never generates a hook, so no
+        hook factory or fallback factory is invoked and nothing is cached.
+        This makes it safe to inspect types without triggering side effects,
+        such as when analyzing union members before one is selected.
+
+        .. versionadded:: NEXT
+        """
+        if is_union_type(type):
+            return self._union_struct_registry.get(type)
+        return self._structure_func.peek_cached(type)
+
     # Classes to Python primitives.
     def unstructure_attrs_asdict(self, obj: Any) -> dict[str, Any]:
         """Our version of `attrs.asdict`, so we can call back to us."""

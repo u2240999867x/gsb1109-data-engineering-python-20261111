@@ -13,6 +13,11 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- Add the `configure_predicate_union` strategy, which structures unions of _attrs_ classes and dataclasses from declared `Literal` markers and mutually exclusive fields without trying member structure hooks in turn.
+  Rejected candidates no longer trigger hook factories or their side effects; a missing tag, unknown tag, conflicting tag, and unresolved ambiguity each raise a dedicated `UnionDisambiguationError` subclass.
+  The selected member's custom structure hook still runs exactly once.
+- Add `BaseConverter.peek_structure_hook`, returning an already-registered structure hook without generating one, so union member analysis can inspect hooks with no side effects.
+
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 

@@ -4,11 +4,13 @@ from typing import Any, Callable, Union
 from attrs import NOTHING, NothingType
 
 from .. import BaseConverter
-from .._compat import get_newtype_base, is_literal, is_subclass, is_union_type
+from .._compat import NoneType, get_newtype_base, is_literal, is_subclass, is_union_type
+from ..disambiguators import create_predicate_dis_func
 from ..sentinels import is_sentinel
 from ..typealiases import get_type_alias_base, is_type_alias
 
 __all__ = [
+    "configure_predicate_union",
     "configure_tagged_union",
     "configure_union_passthrough",
     "default_tag_generator",
@@ -139,6 +141,77 @@ def configure_tagged_union(
         tag_to_hook[tag] = structure_union_member
         exact_cl_unstruct_hooks[cl] = unstructure_union_member
         cl_to_tag[cl] = tag
+
+
+def configure_predicate_union(
+    union: Any, converter: BaseConverter, use_literals: bool = True
+) -> None:
+    """Configure structuring of ``union`` by declarative markers only.
+
+    The union members share most of their fields, so trying every member
+    structure hook in turn would not only waste work but also run hooks with
+    side effects (each ``get_structure_hook`` call registers or materializes
+    a hook). Instead, the payload is first matched against the declared type
+    markers -- literal discriminator fields and mutually exclusive required
+    fields -- without invoking any member hook. Only once a single member is
+    identified is its structure hook invoked, exactly once.
+
+    Distinct errors are raised for the different failure modes:
+
+    * a missing tag and a conflicting tag are reported separately,
+    * an unknown tag value is reported separately as well,
+    * markers that cannot narrow the payload to a single member raise an
+      ambiguity error.
+
+    Custom hooks registered on the individual member types are honored:
+    once a member is selected, its structure hook is resolved (and cached for
+    further payloads) and invoked exactly once, just as with the default
+    sequential strategy -- but without ever materializing or running the
+    hooks of the rejected members.
+
+    :param union: A union of _attrs_ classes and/or dataclasses, or a type
+        alias of one. ``None`` members are supported.
+    :param converter: The converter to apply the strategy to.
+    :param use_literals: Whether to consider literal fields as markers.
+
+    .. versionadded:: NEXT
+    """
+    if is_type_alias(union):
+        union = union.__value__
+
+    members = tuple(arg for arg in union.__args__ if arg is not NoneType)
+    has_none = len(members) != len(union.__args__)
+
+    if len(members) == 1:
+        # Nothing to disambiguate; only an optional ``None`` may be present.
+        only_member = members[0]
+
+        def structure_predicate_union(val: Any, _: Any) -> Any:
+            if has_none and val is None:
+                return None
+            return converter.structure(val, only_member)
+
+    else:
+        dis_func = create_predicate_dis_func(
+            converter, *members, use_literals=use_literals
+        )
+
+        # Resolve member hooks lazily and remember them. Marker evaluation
+        # never touches a hook, so only the selected member's hook is ever
+        # materialized (and it runs exactly once per payload).
+        member_hooks: dict[Any, Callable] = {}
+
+        def structure_predicate_union(val: Any, _: Any) -> Any:
+            if has_none and val is None:
+                return None
+            member = dis_func(val)
+            hook = member_hooks.get(member)
+            if hook is None:
+                hook = converter.get_structure_hook(member)
+                member_hooks[member] = hook
+            return hook(val, member)
+
+    converter.register_structure_hook(union, structure_predicate_union)
 
 
 def configure_union_passthrough(

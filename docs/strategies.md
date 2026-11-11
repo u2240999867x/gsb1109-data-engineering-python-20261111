@@ -130,6 +130,94 @@ Refund for 1!
 
 ```
 
+## Predicate Union Strategy
+
+_Found at {py:func}`cattrs.strategies.configure_predicate_union`._
+
+The _predicate union_ strategy structures a union of _attrs_ classes and/or
+dataclasses whose members share most of their fields, using only the declared
+type markers: `Literal` discriminator fields and mutually exclusive required
+fields.
+
+The markers are evaluated against the payload first, without invoking any
+member structure hook. Only after a single member has been identified is its
+structure hook invoked, exactly once. In particular, rejected candidates never
+have their hooks generated or run, so hook factories with side effects (such
+as ones that register an import) are only ever triggered for the member that
+was actually selected.
+
+This is different from sequentially trying every member hook: a sequential
+attempt runs each hook in turn and catches its failures, which both produces
+misleading errors and triggers side effects for members that end up rejected.
+
+### Distinct Errors
+
+Since the payload is inspected rather than fed through hooks, the different
+failure modes are reported with dedicated error types, all subclasses of
+{py:class}`cattrs.errors.UnionDisambiguationError`:
+
+| Payload situation                         | Error                                                            |
+| ----------------------------------------- | ---------------------------------------------------------------- |
+| The discriminator field is missing        | {py:class}`cattrs.errors.UnionTagMissingError`                   |
+| The discriminator value matches no member | {py:class}`cattrs.errors.UnionTagUnknownError`                   |
+| The value is claimed by several members   | {py:class}`cattrs.errors.UnionTagConflictError`                  |
+| Markers cannot pick a single member       | {py:class}`cattrs.errors.AmbiguousUnionError`                    |
+
+A missing tag and a conflicting tag are deliberately distinct: a conflict
+means the payload carries several valid tags at once, whereas a missing tag
+means it carries none.
+
+```{doctest} predicate_unions
+:options: +ELLIPSIS
+
+>>> from typing import Literal
+>>> from cattrs.strategies import configure_predicate_union
+>>> from cattrs.errors import UnionTagMissingError, UnionTagUnknownError
+>>> converter = Converter()
+
+>>> @define
+... class Created:
+...     kind: Literal["created"]
+...     id: int
+
+>>> @define
+... class Updated:
+...     kind: Literal["updated"]
+...     id: int
+
+>>> Event = Created | Updated
+>>> configure_predicate_union(Event, converter)
+
+>>> converter.structure({"kind": "created", "id": 1}, Event)
+Created(kind='created', id=1)
+
+>>> try:
+...     converter.structure({"id": 1}, Event)
+... except UnionTagMissingError as e:
+...     print(type(e).__name__)
+UnionTagMissingError
+
+>>> try:
+...     converter.structure({"kind": "deleted", "id": 1}, Event)
+... except UnionTagUnknownError as e:
+...     print(type(e).__name__)
+UnionTagUnknownError
+```
+
+When no literal field discriminates the members, the strategy falls back to
+mutually exclusive required fields. A single member with no unique required
+field is treated as the fallback and selected when no marker matches; if the
+markers still leave several candidates, an
+{py:class}`~cattrs.errors.AmbiguousUnionError` is raised instead of guessing.
+
+Custom hooks registered on the individual members keep working: they are
+resolved lazily for the selected member and reused for subsequent payloads,
+matching the behavior of the default sequential entry point, which remains
+available and unchanged.
+
+```{versionadded} NEXT
+```
+
 ## Include Subclasses Strategy
 
 _Found at {py:func}`cattrs.strategies.include_subclasses`._
