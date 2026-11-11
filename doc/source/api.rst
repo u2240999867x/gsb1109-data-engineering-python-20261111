@@ -76,6 +76,7 @@ Dicttoolz
 .. autosummary::
    assoc
    assoc_in
+   assoc_path
    dissoc
    get_in
    itemfilter
@@ -85,6 +86,7 @@ Dicttoolz
    merge
    merge_with
    update_in
+   update_path
    valfilter
    valmap
 

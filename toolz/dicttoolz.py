@@ -5,7 +5,8 @@ from collections.abc import Mapping
 
 __all__ = ('merge', 'merge_with', 'valmap', 'keymap', 'itemmap',
            'valfilter', 'keyfilter', 'itemfilter',
-           'assoc', 'dissoc', 'assoc_in', 'update_in', 'get_in')
+           'assoc', 'dissoc', 'assoc_in', 'update_in', 'get_in',
+           'assoc_path', 'update_path')
 
 
 def _get_factory(f, kwargs):
@@ -337,3 +338,234 @@ def get_in(keys, coll, default=None, no_default=False):
         if no_default:
             raise
         return default
+
+
+def _is_path_container(node):
+    return isinstance(node, (Mapping, list, tuple))
+
+
+def _path_getitem(node, key):
+    if isinstance(node, (Mapping, list, tuple)):
+        return node[key]
+    raise TypeError("cannot follow path key %r into object of type %r"
+                    % (key, type(node).__name__))
+
+
+def _path_assoc(node, key, value):
+    """ Return a shallow copy of ``node`` with ``node[key]`` set to ``value``
+    """
+    if isinstance(node, Mapping):
+        new = node.copy() if hasattr(node, 'copy') else dict(node)
+        new[key] = value
+        return new
+    if isinstance(node, list):
+        new = list(node)
+        new[key] = value
+        return new
+    if isinstance(node, tuple):
+        if hasattr(node, '_fields'):  # namedtuple
+            return node._replace(**{node._fields[key]: value})
+        new = list(node)
+        new[key] = value
+        return tuple(new)
+    raise TypeError("cannot update object of type %r"
+                    % type(node).__name__)
+
+
+def _walk_path(coll, path):
+    """ Return the list of nodes along ``path``, starting with ``coll``
+
+    Raises KeyError, IndexError, or TypeError if the path does not exist in
+    ``coll``, and ValueError if a container occurs twice along the path
+    (i.e. the path leads through a cycle).
+    """
+    nodes = [coll]
+    seen = set()
+    node = coll
+    if _is_path_container(node):
+        seen.add(id(node))
+    for key in path:
+        node = _path_getitem(node, key)
+        if _is_path_container(node):
+            if id(node) in seen:
+                raise ValueError("cycle detected along path; "
+                                 "refusing to update")
+            seen.add(id(node))
+        nodes.append(node)
+    return nodes
+
+
+def _container_parents(root):
+    """ Map id(child) -> list of ids of containers directly holding it
+
+    Every container (mapping, list, tuple) reachable from ``root`` is
+    scanned.  Cycles are followed only once, so this always terminates.
+    """
+    parents = {}
+    visited = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if not _is_path_container(node) or id(node) in visited:
+            continue
+        visited.add(id(node))
+        children = node.values() if isinstance(node, Mapping) else node
+        for child in children:
+            parents.setdefault(id(child), []).append(id(node))
+            if _is_path_container(child):
+                stack.append(child)
+    return parents
+
+
+def update_path(coll, path, func, alias='break'):
+    """ Update the value at an explicit path in nested dicts and lists
+
+    inputs:
+    coll - nested combination of dicts, lists, tuples, and other values
+    path - list or tuple of keys/indices locating the value to update
+    func - function to apply to the value found at the path
+    alias - policy for shared (aliased) containers, one of 'break',
+        'preserve', or 'error'; see below
+
+    Returns a new structure with the value at ``path`` replaced by
+    ``func(value)``.  The input is never mutated, and containers not on the
+    path are shared with the input rather than copied, so unchanged sub-trees
+    (however large) cost nothing.
+
+    Paths may freely mix mappings and sequences:
+
+    >>> doc = {'user': {'name': 'Alice'}, 'meta': {'flags': ['x', 'y']}}
+    >>> update_path(doc, ['meta', 'flags', 1], str.upper)
+    {'user': {'name': 'Alice'}, 'meta': {'flags': ['x', 'Y']}}
+
+    The original is untouched and unchanged parts are shared:
+
+    >>> new = update_path(doc, ['meta', 'flags', 1], str.upper)
+    >>> doc['meta']['flags']
+    ['x', 'y']
+    >>> new['user'] is doc['user']
+    True
+
+    When two paths refer to the same container, the ``alias`` policy decides
+    what an update means:
+
+    - ``alias='break'`` (default): only the given path changes; other
+      references keep pointing to the old object.
+    - ``alias='preserve'``: every reference to a container on the path is
+      updated, so existing aliasing is kept intact.
+    - ``alias='error'``: raise ValueError if any container on the path is
+      referenced from more than one place.
+
+    >>> shared = {'n': 0}
+    >>> d = {'a': shared, 'b': shared}
+    >>> update_path(d, ['a', 'n'], lambda x: x + 1)
+    {'a': {'n': 1}, 'b': {'n': 0}}
+    >>> update_path(d, ['a', 'n'], lambda x: x + 1, alias='preserve')
+    {'a': {'n': 1}, 'b': {'n': 1}}
+    >>> update_path(d, ['a', 'n'], lambda x: x + 1, alias='error')
+    Traceback (most recent call last):
+        ...
+    ValueError: alias='error': container along path is shared
+
+    The path must already exist; missing keys, out-of-range indices, and
+    cycles raise KeyError, IndexError, or ValueError respectively, always
+    leaving the input unchanged:
+
+    >>> update_path({'a': [1, 2]}, ['a', 5], str)
+    Traceback (most recent call last):
+        ...
+    IndexError: list index out of range
+
+    See Also:
+        assoc_path
+        update_in
+        get_in
+    """
+    if alias not in ('break', 'preserve', 'error'):
+        raise ValueError("alias must be one of 'break', 'preserve', or "
+                         "'error', got %r" % (alias,))
+    path = tuple(path)
+    nodes = _walk_path(coll, path)
+    new = func(nodes[-1])
+
+    if alias == 'break':
+        for node, key in zip(reversed(nodes[:-1]), reversed(path)):
+            new = _path_assoc(node, key, new)
+        return new
+
+    target_id = id(nodes[-1])
+    parents = _container_parents(coll)
+
+    if alias == 'error':
+        path_ids = {id(node) for node in nodes if _is_path_container(node)}
+        for node_id in path_ids:
+            expected = 0 if node_id == id(coll) else 1
+            if len(parents.get(node_id, [])) > expected:
+                raise ValueError("alias='error': container along path is "
+                                 "shared")
+        for node, key in zip(reversed(nodes[:-1]), reversed(path)):
+            new = _path_assoc(node, key, new)
+        return new
+
+    # alias == 'preserve': rebuild every container that can reach the
+    # replaced node, memoizing so shared containers stay shared.
+    dirty = set()
+    stack = [target_id]
+    while stack:
+        for parent_id in parents.get(stack.pop(), []):
+            if parent_id not in dirty:
+                dirty.add(parent_id)
+                stack.append(parent_id)
+
+    memo = {}
+    in_progress = set()
+
+    def rebuild(node):
+        node_id = id(node)
+        if node_id == target_id:
+            return new
+        if node_id not in dirty:
+            return node
+        if node_id in memo:
+            return memo[node_id]
+        if node_id in in_progress:
+            raise ValueError("cannot preserve aliases through a cycle")
+        in_progress.add(node_id)
+        if isinstance(node, Mapping):
+            rebuilt = node.copy() if hasattr(node, 'copy') else dict(node)
+            for key in node:
+                rebuilt[key] = rebuild(node[key])
+        elif isinstance(node, list):
+            rebuilt = [rebuild(child) for child in node]
+        elif hasattr(node, '_fields'):  # namedtuple
+            rebuilt = type(node)(*(rebuild(child) for child in node))
+        else:
+            rebuilt = tuple(rebuild(child) for child in node)
+        in_progress.discard(node_id)
+        memo[node_id] = rebuilt
+        return rebuilt
+
+    return rebuild(coll)
+
+
+def assoc_path(coll, path, value, alias='break'):
+    """ Return a new structure with ``value`` set at an explicit path
+
+    Like ``update_path``, but sets the value directly instead of applying a
+    function.  Dicts and lists may be mixed along the path, the input is
+    never mutated, and unchanged sub-trees are shared with the result.
+
+    >>> purchase = {'name': 'Alice',
+    ...             'order': {'items': ['Apple', 'Orange'],
+    ...                       'costs': [0.50, 1.25]}}
+    >>> assoc_path(purchase, ['order', 'costs', 0], 0.25)  # doctest: +SKIP
+    {'name': 'Alice',
+     'order': {'items': ['Apple', 'Orange'], 'costs': [0.25, 1.25]}}
+
+    See ``update_path`` for the meaning of the ``alias`` policy.
+
+    See Also:
+        update_path
+        assoc_in
+    """
+    return update_path(coll, path, lambda _: value, alias=alias)

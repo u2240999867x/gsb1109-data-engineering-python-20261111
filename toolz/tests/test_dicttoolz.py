@@ -3,7 +3,8 @@ from collections.abc import Mapping
 import os
 from toolz.dicttoolz import (merge, merge_with, valmap, keymap, update_in,
                              assoc, dissoc, keyfilter, valfilter, itemmap,
-                             itemfilter, assoc_in, get_in)
+                             itemfilter, assoc_in, get_in, assoc_path,
+                             update_path)
 from toolz.functoolz import identity
 from toolz.utils import raises
 
@@ -297,3 +298,100 @@ def test_dissoc_agrees_on_both_sides_of_its_size_heuristic():
     assert dissoc(d, "1", "2") == {k: v for k, v in d.items() if k not in ("1", "2")}
     assert dissoc(d, *[str(i) for i in range(9)]) == {"9": 9}
     assert dissoc(d) == d
+
+
+def test_update_path():
+    assert update_path({'a': 0}, ['a'], inc) == {'a': 1}
+    assert update_path({'a': 0, 'b': 1}, ['b'], str) == {'a': 0, 'b': '1'}
+    assert update_path({}, [], lambda x: 'new') == 'new'
+
+
+def test_update_path_mixes_dicts_and_lists():
+    doc = {'user': {'name': 'Alice', 'roles': ['admin', 'user']},
+           'meta': {'version': 3, 'flags': ['x', 'y']}}
+    new = update_path(doc, ['meta', 'flags', 1], str.upper)
+    assert new == {'user': {'name': 'Alice', 'roles': ['admin', 'user']},
+                   'meta': {'version': 3, 'flags': ['x', 'Y']}}
+    new = update_path(doc, ['user', 'roles', 0], lambda r: 'root')
+    assert new['user']['roles'] == ['root', 'user']
+    # tuples work too
+    assert update_path({'a': (1, 2)}, ['a', 0], inc) == {'a': (2, 2)}
+
+
+def test_update_path_does_not_mutate_and_shares_untouched_parts():
+    big = {'%d' % i: i for i in range(1000)}
+    doc = {'meta': big, 'items': [1, 2, 3]}
+    new = update_path(doc, ['items', 0], inc)
+    assert doc == {'meta': big, 'items': [1, 2, 3]}
+    assert new is not doc
+    assert new['items'] is not doc['items']
+    # unchanged sub-trees are shared, not copied
+    assert new['meta'] is doc['meta']
+
+
+def test_update_path_alias_break_is_the_default():
+    shared = {'n': 0}
+    d = {'a': shared, 'b': shared}
+    new = update_path(d, ['a', 'n'], inc)
+    assert new['a'] == {'n': 1}
+    assert new['b'] == {'n': 0}
+    assert new['b'] is shared
+    assert d == {'a': {'n': 0}, 'b': {'n': 0}}
+
+
+def test_update_path_alias_preserve():
+    shared = {'n': 0}
+    d = {'a': shared, 'b': shared}
+    new = update_path(d, ['a', 'n'], inc, alias='preserve')
+    assert new == {'a': {'n': 1}, 'b': {'n': 1}}
+    # the alias itself is preserved: both keys reference one new object
+    assert new['a'] is new['b']
+    assert d == {'a': {'n': 0}, 'b': {'n': 0}}
+    # containers not involved in the update are still shared
+    other = {'m': 5}
+    d2 = {'a': shared, 'b': shared, 'c': other}
+    new2 = update_path(d2, ['a', 'n'], inc, alias='preserve')
+    assert new2['c'] is other
+
+
+def test_update_path_alias_error():
+    shared = {'n': 0}
+    d = {'a': shared, 'b': shared}
+    assert raises(ValueError, lambda: update_path(d, ['a', 'n'], inc,
+                                                  alias='error'))
+    # input untouched by the rejected update
+    assert d == {'a': {'n': 0}, 'b': {'n': 0}}
+    # no aliasing, no error
+    assert update_path({'a': {'n': 0}}, ['a', 'n'], inc,
+                       alias='error') == {'a': {'n': 1}}
+    assert raises(ValueError, lambda: update_path({}, [], inc, alias='bogus'))
+
+
+def test_update_path_out_of_bounds_leaves_input_alone():
+    doc = {'a': [1, 2], 'b': {'c': 1}}
+    assert raises(IndexError, lambda: update_path(doc, ['a', 5], inc))
+    assert raises(KeyError, lambda: update_path(doc, ['b', 'z'], inc))
+    assert raises(TypeError, lambda: update_path(doc, ['b', 'c', 'd'], inc))
+    assert doc == {'a': [1, 2], 'b': {'c': 1}}
+
+
+def test_update_path_cycle_leaves_input_alone():
+    d = {'x': 1}
+    d['self'] = d
+    assert raises(ValueError, lambda: update_path(d, ['self', 'x'], inc))
+    assert raises(ValueError, lambda: update_path(d, ['self', 'self', 'x'],
+                                                  inc, alias='preserve'))
+    assert d['x'] == 1 and d['self'] is d
+
+
+def test_assoc_path():
+    doc = {'order': {'items': ['Apple', 'Orange'], 'costs': [0.50, 1.25]}}
+    new = assoc_path(doc, ['order', 'costs', 0], 0.25)
+    assert new == {'order': {'items': ['Apple', 'Orange'],
+                             'costs': [0.25, 1.25]}}
+    assert doc['order']['costs'] == [0.50, 1.25]
+    assert new['order']['items'] is doc['order']['items']
+    shared = {'n': 0}
+    d = {'a': shared, 'b': shared}
+    assert assoc_path(d, ['a', 'n'], 1, alias='preserve') == {'a': {'n': 1},
+                                                              'b': {'n': 1}}
