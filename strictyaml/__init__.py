@@ -36,6 +36,9 @@ from strictyaml.compound import MapCombined
 from strictyaml.compound import Seq
 from strictyaml.compound import UniqueSeq
 from strictyaml.compound import FixedSeq
+from strictyaml.rules import MapRule
+from strictyaml.rules import MutuallyExclusive
+from strictyaml.rules import Requires
 
 # Base exception from strictyaml.ruamel (all exceptions inherit from this)
 from strictyaml.ruamel import YAMLError

@@ -3,6 +3,8 @@
 
 ### Latest
 
+* FEATURE : Declarative mapping-level rules on Map via the 'rules' parameter - MutuallyExclusive (keys which may not appear together) and Requires (keys required when a flag is enabled). Rule violations report the original keys involved and are only checked after all individual fields pass validation.
+
 * BUGFIX : Fully parse URL, fix #141
 
 

@@ -1,5 +1,10 @@
-from strictyaml.exceptions import YAMLSerializationError, InvalidOptionalDefault
+from strictyaml.exceptions import (
+    YAMLSerializationError,
+    InvalidOptionalDefault,
+    InvalidValidatorError,
+)
 from strictyaml.validators import Validator, MapValidator, SeqValidator
+from strictyaml.rules import MapRule
 from strictyaml.ruamel.comments import CommentedMap, CommentedSeq
 from strictyaml.representation import YAML
 from strictyaml.scalar import ScalarValidator, Str
@@ -93,12 +98,17 @@ class MapPattern(MapValidator):
 
 
 class Map(MapValidator):
-    def __init__(self, validator, key_validator=None):
+    def __init__(self, validator, key_validator=None, rules=None):
         self._validator = validator
         self._key_validator = Str() if key_validator is None else key_validator
         assert isinstance(
             self._key_validator, ScalarValidator
         ), "key validator must be ScalarValidator"
+
+        self._rules = [] if rules is None else rules
+
+        for rule in self._rules:
+            assert isinstance(rule, MapRule), "rules must be MapRule instances"
 
         self._validator_dict = {
             key.key if isinstance(key, Optional) else key: value
@@ -132,6 +142,21 @@ class Map(MapValidator):
             and (key.default is not None or not key.drop_if_none)
         }
 
+        self._check_rule_keys()
+
+    def _check_rule_keys(self):
+        for rule in self._rules:
+            unknown_keys = [
+                key for key in rule.keys if key not in self._validator_dict
+            ]
+            if unknown_keys:
+                raise InvalidValidatorError(
+                    "{0} refers to key(s) not in schema: {1}".format(
+                        repr(rule),
+                        ", ".join("'{0}'".format(key) for key in unknown_keys),
+                    )
+                )
+
     @property
     def key_validator(self):
         return self._key_validator
@@ -158,6 +183,8 @@ class Map(MapValidator):
 
     def validate(self, chunk):
         found_keys = set()
+        validated_values = {}
+        key_chunks = {}
         items = chunk.expect_mapping()
 
         for key, value in items:
@@ -166,10 +193,13 @@ class Map(MapValidator):
             if yaml_key.scalar not in self._validator_dict.keys():
                 self.unexpected_key(key, yaml_key, value, chunk)
 
-            value.process(self.get_validator(yaml_key.scalar)(value))
+            validated_value = self.get_validator(yaml_key.scalar)(value)
+            value.process(validated_value)
             key.process(yaml_key)
             chunk.add_key_association(key.contents, yaml_key.data)
             found_keys.add(yaml_key.scalar)
+            validated_values[yaml_key.scalar] = validated_value.data
+            key_chunks[yaml_key.scalar] = key
 
         for default_key, default_data in self._defaults.items():
             if default_key not in [key.contents for key, _ in items]:
@@ -198,6 +228,7 @@ class Map(MapValidator):
                     sp._value[yaml_key] = updated_value
                 else:
                     sp[yaml_key] = updated_value
+                validated_values[default_key] = updated_value.data
 
         if not set(self._required_keys).issubset(found_keys):
             chunk.while_parsing_found(
@@ -208,6 +239,9 @@ class Map(MapValidator):
                     )
                 ),
             )
+
+        for rule in self._rules:
+            rule.check(chunk, validated_values, key_chunks)
 
     def to_yaml(self, data):
         self._should_be_mapping(data)
@@ -224,9 +258,14 @@ class Map(MapValidator):
 
 
 class MapCombined(Map):
-    def __init__(self, map_validator, key_validator, value_validator):
-        super(MapCombined, self).__init__(map_validator, key_validator)
+    def __init__(self, map_validator, key_validator, value_validator, rules=None):
+        super(MapCombined, self).__init__(map_validator, key_validator, rules=rules)
         self._value_validator = value_validator
+
+    def _check_rule_keys(self):
+        # MapCombined allows arbitrary keys, so rule keys are not
+        # checked against the schema.
+        pass
 
     def get_validator(self, key):
         return self._validator_dict.get(key, self._value_validator)
