@@ -12,6 +12,16 @@ The glom team's approach to updates can be summed up as:
 Check this page when upgrading, we strive to keep the updates
 summarized and well-linked.
 
+## Unreleased
+
+- Add `Fanout` and `Outlet` to `glom.streaming` for declaratively routing
+  one input stream to several local outlets. Each record's rules are
+  evaluated once, multi-outlet matches all receive the result (and optional
+  rejection reasons), and bounded per-outlet buffers provide explicit
+  backpressure policies (`BLOCK`, `DROP_NEWEST`, or a callable) instead of
+  reading the whole input. A run stops consuming the source once all
+  outlets are closed. The existing `Iter` pipeline is unchanged.
+
 ## 25.12.0
 
 _(December 28, 2025)_
