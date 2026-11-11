@@ -256,6 +256,105 @@ def test_read_keyerror(cache):
             pass
 
 
+def test_range_reader(cache):
+    value = b'abcd' * 2**20
+    cache.set(0, value)
+
+    with cache.range_reader(0) as reader:
+        assert reader.size == len(value)
+        assert not reader.closed
+        assert reader.read(0, 4) == value[:4]
+        assert reader.read(-4) == value[-4:]
+        assert reader.read(4, 8) == value[4:8]
+        assert reader.read() == value
+
+    assert reader.closed
+
+
+def test_range_reader_bounds(cache):
+    value = b'abcd' * 2**20
+    cache.set(0, value)
+
+    with cache.range_reader(0) as reader:
+        # Ranges beyond the end of the file are clamped like slices.
+        assert reader.read(len(value), len(value) + 100) == b''
+        assert reader.read(0, len(value) + 100) == value
+        assert reader.read(-len(value) - 4, 4) == value[:4]
+        assert reader.read(4, -4) == value[4:-4]
+        # Invalid ranges resolve to empty like slices.
+        assert reader.read(8, 4) == b''
+        assert reader.read(4, 4) == b''
+
+
+def test_range_reader_keyerror(cache):
+    with pytest.raises(KeyError):
+        cache.range_reader(0)
+
+
+def test_range_reader_ioerror(cache):
+    func = mock.Mock(side_effect=IOError(errno.ENOENT, ''))
+
+    cache[0] = b'abcd' * 2**20
+
+    with mock.patch('diskcache.core.open', func):
+        with pytest.raises(KeyError):
+            cache.range_reader(0)
+
+
+def test_range_reader_not_file(cache):
+    cache.set(0, b'small')
+
+    with pytest.raises(ValueError):
+        cache.range_reader(0)
+
+
+def test_range_reader_replaced(cache):
+    old_value = b'aaaa' * 2**20
+    new_value = b'bbbb' * 2**20
+    cache.set(0, old_value)
+
+    reader = cache.range_reader(0)
+    cache.set(0, new_value)
+
+    try:
+        # Reads observe the version current when the reader was created.
+        assert reader.read(0, 8) == old_value[:8]
+        assert reader.read(-8) == old_value[-8:]
+    finally:
+        reader.close()
+
+    with cache.range_reader(0) as reader:
+        assert reader.read(0, 8) == new_value[:8]
+
+
+def test_range_reader_evicted(cache):
+    value = b'abcd' * 2**20
+    cache.set(0, value)
+
+    reader = cache.range_reader(0)
+    cache.delete(0)
+
+    try:
+        # Open reader still reads the version from when it was created.
+        assert reader.read(0, 8) == value[:8]
+    finally:
+        reader.close()
+
+    with pytest.raises(KeyError):
+        cache.range_reader(0)
+
+
+def test_range_reader_closed(cache):
+    cache.set(0, b'abcd' * 2**20)
+
+    reader = cache.range_reader(0)
+    reader.close()
+
+    assert reader.closed
+    with pytest.raises(ValueError):
+        reader.read(0, 4)
+
+
 def test_set_twice(cache):
     large_value = b'abcd' * 2**20
 

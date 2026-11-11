@@ -313,6 +313,19 @@ class FanoutCache:
             raise KeyError(key)
         return handle
 
+    def range_reader(self, key):
+        """Return range reader for file-backed value corresponding to `key`.
+
+        :param key: key for item
+        :return: range reader for value
+        :raises KeyError: if key is not found
+        :raises ValueError: if value is not stored as a file
+
+        """
+        index = self._hash(key) % self._count
+        shard = self._shards[index]
+        return shard.range_reader(key)
+
     def __contains__(self, key):
         """Return `True` if `key` matching item is found in cache.
 

@@ -283,6 +283,23 @@ class Disk:
             else:
                 return pickle.load(io.BytesIO(value))
 
+    def fetch_range(self, mode, filename, value):
+        """Open file storing fields `mode`, `filename`, and `value` from
+        Cache table for byte-range reading.
+
+        :param int mode: value mode raw, binary, text, or pickle
+        :param str filename: filename of corresponding value
+        :param value: database value
+        :return: open file handle for binary reading
+        :raises ValueError: if the value is not stored as a file
+        :raises IOError: if the value file cannot be opened
+
+        """
+        # pylint: disable=unused-argument,consider-using-with
+        if filename is None:
+            raise ValueError('value is not stored as a file')
+        return open(op.join(self._directory, filename), 'rb')
+
     def filename(self, key=UNKNOWN, value=UNKNOWN):
         """Return filename and full-path tuple for file storage.
 
@@ -370,6 +387,83 @@ class JSONDisk(Disk):
         if not read:
             data = json.loads(zlib.decompress(data).decode('utf-8'))
         return data
+
+
+class RangeReader:
+    """Byte-range reader for file-backed cache values.
+
+    Instances are returned by :meth:`Cache.range_reader
+    <diskcache.Cache.range_reader>`. The value file is opened when the
+    reader is created and stays open until :meth:`close` is called.
+    Because every stored version of a value is written to a distinct
+    file, all reads observe the version that was current when the reader
+    was created, even if the key is concurrently replaced or evicted.
+
+    Readers support the context manager protocol and should be closed
+    promptly to release the underlying file handle.
+
+    """
+
+    def __init__(self, handle):
+        self._handle = handle
+        self._lock = threading.Lock()
+        self._size = os.fstat(handle.fileno()).st_size
+
+    @property
+    def size(self):
+        """Size in bytes of the value as of reader creation."""
+        return self._size
+
+    @property
+    def closed(self):
+        """True when the reader is closed."""
+        return self._handle.closed
+
+    def read(self, start=0, stop=None):
+        """Read bytes from `start` (inclusive) to `stop` (exclusive).
+
+        Offsets follow slice semantics: negative offsets count from the
+        end of the value and offsets beyond the end are clamped. When
+        the resolved range is empty, `b''` is returned.
+
+        :param int start: byte offset to start reading (default 0)
+        :param int stop: byte offset to stop reading (default None, end
+            of value)
+        :return: bytes in the requested range
+        :raises ValueError: if the reader is closed
+
+        """
+        if self.closed:
+            raise ValueError('I/O operation on closed range reader')
+
+        size = self._size
+
+        if start < 0:
+            start += size
+        start = min(max(start, 0), size)
+
+        if stop is None:
+            stop = size
+        elif stop < 0:
+            stop += size
+        stop = min(max(stop, 0), size)
+
+        if start >= stop:
+            return b''
+
+        with self._lock:
+            self._handle.seek(start)
+            return self._handle.read(stop - start)
+
+    def close(self):
+        """Close the reader and release the underlying file handle."""
+        self._handle.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        self.close()
 
 
 class Timeout(Exception):
@@ -1251,6 +1345,48 @@ class Cache:
         if handle is ENOVAL:
             raise KeyError(key)
         return handle
+
+    def range_reader(self, key):
+        """Return range reader for file-backed value corresponding to `key`.
+
+        The returned :class:`RangeReader <diskcache.RangeReader>` reads
+        byte ranges directly from the value file without loading the
+        whole value into memory. All reads observe the version of the
+        value that was current when the reader was created. If the key
+        is replaced or evicted before the value file is opened, KeyError
+        is raised rather than mixing old and new versions.
+
+        Values stored in the database itself, like small objects, are
+        not file-backed. Use :meth:`get <diskcache.Cache.get>` to
+        retrieve those.
+
+        :param key: key matching item
+        :return: range reader for value
+        :raises KeyError: if key is not found
+        :raises ValueError: if value is not stored as a file
+
+        """
+        db_key, raw = self._disk.put(key)
+        select = (
+            'SELECT mode, filename, value FROM Cache'
+            ' WHERE key = ? AND raw = ?'
+            ' AND (expire_time IS NULL OR expire_time > ?)'
+        )
+
+        rows = self._sql(select, (db_key, raw, time.time())).fetchall()
+
+        if not rows:
+            raise KeyError(key)
+
+        ((mode, filename, db_value),) = rows
+
+        try:
+            handle = self._disk.fetch_range(mode, filename, db_value)
+        except IOError:
+            # Key was deleted before the file could be opened.
+            raise KeyError(key) from None
+
+        return RangeReader(handle)
 
     def __contains__(self, key):
         """Return `True` if `key` matching item is found in cache.
