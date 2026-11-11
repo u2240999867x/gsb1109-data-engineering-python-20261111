@@ -21,6 +21,7 @@ def all_tests_suite():
         'dirtyjson.tests.test_errors',
         'dirtyjson.tests.test_fail',
         'dirtyjson.tests.test_float',
+        'dirtyjson.tests.test_identifier_keys',
         'dirtyjson.tests.test_integer',
         'dirtyjson.tests.test_pass1',
         'dirtyjson.tests.test_pass2',

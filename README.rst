@@ -12,7 +12,8 @@ syntax (ECMA-262 3rd edition) used as a lightweight data interchange format.
 files. The returned data structure includes information about line and column
 numbers, so you can output more useful error messages. The input can also
 include single quotes, line comments, inline comments, dangling commas,
-unquoted single-word keys, and hexadecimal and octal numbers.
+unquoted identifier keys (with ``\\uXXXX`` escapes), and hexadecimal and
+octal numbers.
 
 The goal of `dirtyjson` is to read JSON objects out of files that are
 littered with elements that do not fit the official JSON standard. By providing
@@ -72,6 +73,50 @@ Using Decimal instead of float::
     >>> import dirtyjson
     >>> from decimal import Decimal
     >>> dirtyjson.loads('1.1', parse_float=Decimal) == Decimal('1.1')
+    True
+
+
+Identifier keys and duplicate keys
+-----------------------------------
+
+Object keys may be written with or without quotes. Quoted keys (single or
+double) accept any string, exactly like a JSON string. Unquoted keys follow a
+fixed identifier grammar instead of the identifier rules of the machine
+running the parser, so the same document decodes identically everywhere:
+
+* the first character is an ASCII letter, ``_``, ``$``, or a non-ASCII
+  Unicode letter or letter-number;
+* each following character is one of those, an ASCII digit, a combining
+  mark, a decimal number other than a digit, or a connector punctuation
+  character such as ``_``.
+
+``\\uXXXX`` escape sequences (including surrogate pairs) are supported inside
+unquoted keys and the decoded character is checked against the same grammar.
+The original spelling does not matter: a quoted key, a bare identifier and an
+escaped identifier all produce the same key::
+
+    >>> dirtyjson.loads(u'{名前: 1}') == {u'名前': 1}
+    True
+    >>> dirtyjson.loads('{' + chr(92) + 'u0062: 1}') == {'b': 1}
+    True
+
+When two key spellings decode to the same string they are one key, never two
+unrelated entries. The *duplicate_key_policy* argument selects what happens:
+
+``dirtyjson.DUPLICATE_KEY_USE_LAST`` (default)
+    later values replace earlier ones, keeping the original key order;
+``dirtyjson.DUPLICATE_KEY_USE_FIRST``
+    the first value and its position information are kept;
+``dirtyjson.DUPLICATE_KEY_ERROR``
+    a `dirtyjson.Error` is raised at the duplicate key.
+
+::
+
+    >>> doc = '{"ab": 1, ab: 2}'
+    >>> dirtyjson.loads(doc) == {'ab': 2}
+    True
+    >>> dirtyjson.loads(doc,
+    ...     duplicate_key_policy=dirtyjson.DUPLICATE_KEY_USE_FIRST) == {'ab': 1}
     True
 
 
@@ -147,6 +192,12 @@ load(fp[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first
    the first occurrence of either ``{`` or ``[``. This is very useful for
    reading an object from a JavaScript file.
 
+   *duplicate_key_policy* selects how an object handles two keys (quoted or
+   unquoted) that decode to the same string. Use
+   ``dirtyjson.DUPLICATE_KEY_USE_LAST`` (the default),
+   ``dirtyjson.DUPLICATE_KEY_USE_FIRST`` or
+   ``dirtyjson.DUPLICATE_KEY_ERROR``.
+
 loads(s[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first_object[, start_index]]]]])
 
    Deserialize *s* (a `str` or `unicode` instance containing a JSON
@@ -167,6 +218,8 @@ loads(s[, encoding[, parse_float[, parse_int[, parse_constant[, search_for_first
    the specified offset, while maintaining the correct line and column numbers.
    This is very useful for reading an object from the middle of a JavaScript
    file.
+
+   *duplicate_key_policy* has the same meaning as in `load`.
 
    The other arguments have the same meaning as in `load`.
 

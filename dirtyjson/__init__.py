@@ -1,6 +1,11 @@
 from __future__ import absolute_import
 from .error import Error
-from .loader import DirtyJSONLoader
+from .loader import (
+    DirtyJSONLoader,
+    DUPLICATE_KEY_USE_LAST,
+    DUPLICATE_KEY_USE_FIRST,
+    DUPLICATE_KEY_ERROR,
+)
 
 r"""JSON (JavaScript Object Notation) <http://json.org> is a subset of
 JavaScript syntax (ECMA-262 3rd edition) used as a lightweight data
@@ -27,13 +32,17 @@ Decoding JSON::
     True
 
 """
-__all__ = ['load', 'loads', 'Error']
+__all__ = [
+    'load', 'loads', 'Error',
+    'DUPLICATE_KEY_USE_LAST', 'DUPLICATE_KEY_USE_FIRST', 'DUPLICATE_KEY_ERROR',
+]
 
 __author__ = 'Scott Maxwell <scott@codecobblers.com>'
 
 
 def load(fp, encoding=None, parse_float=None, parse_int=None,
-         parse_constant=None, search_for_first_object=False):
+         parse_constant=None, search_for_first_object=False,
+         duplicate_key_policy=DUPLICATE_KEY_USE_LAST):
     """Deserialize ``fp`` (a ``.read()``-supporting file-like object containing
     a JSON document) to a Python object.
 
@@ -58,13 +67,21 @@ def load(fp, encoding=None, parse_float=None, parse_int=None,
     following strings: ``'-Infinity'``, ``'Infinity'``, ``'NaN'``.  This
     can be used to raise an exception if invalid JSON numbers are
     encountered.
+
+    *duplicate_key_policy* controls what happens when an object contains
+    two keys that decode to the same string (this includes an unquoted
+    key and a quoted key that share one decoded spelling). It accepts
+    ``dirtyjson.DUPLICATE_KEY_USE_LAST`` (the default),
+    ``dirtyjson.DUPLICATE_KEY_USE_FIRST`` or
+    ``dirtyjson.DUPLICATE_KEY_ERROR``, which raises :class:`Error`.
     """
     return loads(fp.read(), encoding, parse_float, parse_int, parse_constant,
-                 search_for_first_object)
+                 search_for_first_object, 0, duplicate_key_policy)
 
 
 def loads(s, encoding=None, parse_float=None, parse_int=None,
-          parse_constant=None, search_for_first_object=False, start_index=0):
+          parse_constant=None, search_for_first_object=False, start_index=0,
+          duplicate_key_policy=DUPLICATE_KEY_USE_LAST):
     """Deserialize ``s`` (a ``str`` or ``unicode`` instance containing a JSON
     document) to a Python object.
 
@@ -89,6 +106,11 @@ def loads(s, encoding=None, parse_float=None, parse_int=None,
     following strings: ``'-Infinity'``, ``'Infinity'``, ``'NaN'``.  This
     can be used to raise an exception if invalid JSON numbers are
     encountered.
+
+    *duplicate_key_policy* controls what happens when an object contains
+    two keys that decode to the same string. See :func:`load` for the
+    accepted values.
     """
-    d = DirtyJSONLoader(s, encoding, parse_float, parse_int, parse_constant)
+    d = DirtyJSONLoader(s, encoding, parse_float, parse_int, parse_constant,
+                        duplicate_key_policy)
     return d.decode(search_for_first_object, start_index)

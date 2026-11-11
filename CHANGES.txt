@@ -5,3 +5,14 @@ Version 1.0.0
 Version 1.0.8
 
  * Add Python 3.10 support
+
+Version 1.1.0
+
+ * Unquoted keys now follow a declared identifier grammar instead of the
+   host machine's word-character/``isidentifier`` definition, so non-ASCII
+   keys decode identically everywhere
+ * Unquoted keys support ``\uXXXX`` escapes (including surrogate pairs),
+   with the decoded characters checked against the identifier grammar
+ * Add the ``duplicate_key_policy`` argument to ``load`` and ``loads``:
+   ``use_last`` (default), ``use_first`` or ``error``; different key
+   spellings that decode to the same string are treated as one key

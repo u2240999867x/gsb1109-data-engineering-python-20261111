@@ -4,6 +4,7 @@ from __future__ import absolute_import
 import re
 import sys
 import struct
+import unicodedata
 from .compat import fromhex, u, text_type, binary_type, PY2, unichr, ascii
 from dirtyjson.attributed_containers import AttributedDict, AttributedList
 from .error import Error
@@ -34,9 +35,52 @@ NUMBER_RE = re.compile(r'(-?(?:0x[\da-fA-F]+|\d+))(\.\d+)?([eE][-+]?\d+)?')
 EQUATION_RE = re.compile(r'[0-9.+\-]*[()[0-9+\-*/eEx&|]+')
 STRINGCHUNK_DOUBLEQUOTE = re.compile(r'(.*?)(["\\\x00-\x1f])')
 STRINGCHUNK_SINGLEQUOTE = re.compile(r"(.*?)(['\\\x00-\x1f])")
-UNQUOTED_KEYNAME = re.compile(r"([\w_$]+[\w\d_$]*)")
 WHITESPACE_STR = ' \t\n\r'
 WHITESPACE = re.compile('[%s]*' % WHITESPACE_STR, re.VERBOSE | re.MULTILINE | re.DOTALL)
+
+# Explicit grammar for unquoted (identifier) keys.
+#
+# An unquoted key starts with an identifier start character (an ASCII
+# letter, ``_`` or ``$``, or any non-ASCII character declared as a
+# Unicode letter/underscore below) and continues with zero or more
+# identifier continuation characters (a start character or an ASCII
+# digit).  Membership is decided by this declared grammar instead of the
+# word-character definition of the machine running the parser, so the
+# same document decodes the same way everywhere.
+_IDENTIFIER_START_CATEGORIES = frozenset((
+    'Lu', 'Ll', 'Lt', 'Lm', 'Lo', 'Nl',
+))
+_IDENTIFIER_CONTINUE_CATEGORIES = frozenset((
+    'Lu', 'Ll', 'Lt', 'Lm', 'Lo', 'Nl', 'Mn', 'Mc', 'Nd', 'Pc',
+))
+
+
+def _is_identifier_start(char):
+    if char in '_$':
+        return True
+    if 'a' <= char <= 'z' or 'A' <= char <= 'Z':
+        return True
+    return unicodedata.category(char) in _IDENTIFIER_START_CATEGORIES
+
+
+def _is_identifier_continue(char):
+    if char in '_$':
+        return True
+    if 'a' <= char <= 'z' or 'A' <= char <= 'Z' or '0' <= char <= '9':
+        return True
+    return unicodedata.category(char) in _IDENTIFIER_CONTINUE_CATEGORIES
+
+
+# Duplicate key policies: what happens when two key spellings decode to
+# the same key string inside one object.
+DUPLICATE_KEY_USE_LAST = 'use_last'
+DUPLICATE_KEY_USE_FIRST = 'use_first'
+DUPLICATE_KEY_ERROR = 'error'
+DUPLICATE_KEY_POLICIES = frozenset((
+    DUPLICATE_KEY_USE_LAST,
+    DUPLICATE_KEY_USE_FIRST,
+    DUPLICATE_KEY_ERROR,
+))
 
 BACKSLASH = {
     '"': u('"'), '\'': u('\''), '\\': u('\u005c'), '/': u('/'),
@@ -93,11 +137,16 @@ class DirtyJSONLoader(object):
     """
 
     def __init__(self, content, encoding=None, parse_float=None, parse_int=None,
-                 parse_constant=None):
+                 parse_constant=None, duplicate_key_policy=DUPLICATE_KEY_USE_LAST):
         self.encoding = encoding or DEFAULT_ENCODING
         self.parse_float = parse_float or float
         self.parse_int = parse_int or int
         self.parse_constant = parse_constant or _CONSTANTS.__getitem__
+        if duplicate_key_policy not in DUPLICATE_KEY_POLICIES:
+            raise ValueError(
+                "duplicate_key_policy must be one of %r, got %r"
+                % (sorted(DUPLICATE_KEY_POLICIES), duplicate_key_policy))
+        self.duplicate_key_policy = duplicate_key_policy
         self.memo = {}
         if not PY2 and isinstance(content, binary_type):
             self.content = content.decode()
@@ -207,7 +256,7 @@ class DirtyJSONLoader(object):
         raise Error(self.expecting, self.content, self.pos)
 
     def parse_string(self, terminating_character,
-                     _b=BACKSLASH, _join=u('').join,
+                     _join=u('').join,
                      _py2=PY2, _maxunicode=sys.maxunicode):
         """Scan the string for a JSON string. End is the index of the
         character in string after the quote that started the JSON string.
@@ -239,50 +288,101 @@ class DirtyJSONLoader(object):
             elif terminator != '\\':
                 _append(terminator)
                 continue
-            try:
-                esc = self.content[self.pos]
-            except IndexError:
-                raise Error(
-                    "Unterminated string starting at", self.content, begin)
-            # If not a unicode escape sequence, must be in the lookup table
-            if esc != 'u':
-                try:
-                    char = _b[esc]
-                except KeyError:
-                    msg = "Invalid \\X escape sequence %r"
-                    raise Error(msg, self.content, self.pos)
-                self.pos += 1
-            else:
-                # Unicode escape sequence
-                msg = "Invalid \\uXXXX escape sequence"
-                esc = self.content[self.pos + 1:self.pos + 5]
-                esc_x = esc[1:2]
-                if len(esc) != 4 or esc_x == 'x' or esc_x == 'X':
-                    raise Error(msg, self.content, self.pos - 1)
-                try:
-                    uni = int(esc, 16)
-                except ValueError:
-                    raise Error(msg, self.content, self.pos - 1)
-                self.pos += 5
-                # Check for surrogate pair on UCS-4 systems
-                # Note that this will join high/low surrogate pairs
-                # but will also pass unpaired surrogates through
-                if _maxunicode > 65535 and uni & 0xfc00 == 0xd800 and self.content[self.pos:self.pos + 2] == '\\u':
-                    esc2 = self.content[self.pos + 2:self.pos + 6]
-                    esc_x = esc2[1:2]
-                    if len(esc2) == 4 and not (esc_x == 'x' or esc_x == 'X'):
-                        try:
-                            uni2 = int(esc2, 16)
-                        except ValueError:
-                            raise Error(msg, self.content, self.pos)
-                        if uni2 & 0xfc00 == 0xdc00:
-                            uni = 0x10000 + (((uni - 0xd800) << 10) |
-                                             (uni2 - 0xdc00))
-                            self.pos += 6
-                char = unichr(uni)
             # Append the unescaped character
-            _append(char)
+            _append(self._scan_escape(begin, _maxunicode))
         return _join(chunks)
+
+    def _scan_escape(self, begin, _maxunicode=sys.maxunicode):
+        """Decode one escape sequence with ``self.pos`` pointing just past
+        the opening backslash. Returns the decoded character and leaves
+        ``self.pos`` on the first character after the escape.
+
+        Shared by quoted strings and unquoted identifier keys so both use
+        exactly the same declared escape grammar."""
+        try:
+            esc = self.content[self.pos]
+        except IndexError:
+            raise Error(
+                "Unterminated string starting at", self.content, begin)
+        # If not a unicode escape sequence, must be in the lookup table
+        if esc != 'u':
+            try:
+                char = BACKSLASH[esc]
+            except KeyError:
+                msg = "Invalid \\X escape sequence %r"
+                raise Error(msg, self.content, self.pos)
+            self.pos += 1
+        else:
+            # Unicode escape sequence
+            msg = "Invalid \\uXXXX escape sequence"
+            esc = self.content[self.pos + 1:self.pos + 5]
+            esc_x = esc[1:2]
+            if len(esc) != 4 or esc_x == 'x' or esc_x == 'X':
+                raise Error(msg, self.content, self.pos - 1)
+            try:
+                uni = int(esc, 16)
+            except ValueError:
+                raise Error(msg, self.content, self.pos - 1)
+            self.pos += 5
+            # Check for surrogate pair on UCS-4 systems
+            # Note that this will join high/low surrogate pairs
+            # but will also pass unpaired surrogates through
+            if _maxunicode > 65535 and uni & 0xfc00 == 0xd800 and self.content[self.pos:self.pos + 2] == '\\u':
+                esc2 = self.content[self.pos + 2:self.pos + 6]
+                esc_x = esc2[1:2]
+                if len(esc2) == 4 and not (esc_x == 'x' or esc_x == 'X'):
+                    try:
+                        uni2 = int(esc2, 16)
+                    except ValueError:
+                        raise Error(msg, self.content, self.pos)
+                    if uni2 & 0xfc00 == 0xdc00:
+                        uni = 0x10000 + (((uni - 0xd800) << 10) |
+                                         (uni2 - 0xdc00))
+                        self.pos += 6
+            char = unichr(uni)
+        return char
+
+    def parse_identifier_key(self):
+        """Parse an unquoted key following the declared identifier-key
+        grammar.
+
+        The key starts with an identifier start character and continues with
+        identifier continuation characters (see ``_is_identifier_start`` /
+        ``_is_identifier_continue``). ``\\uXXXX`` escape sequences (including
+        surrogate pairs) are decoded and the resulting character must satisfy
+        the same grammar rules as a literal character. ``self.pos`` is assumed
+        to point just past the first character of the key, matching the
+        quoted-string entry convention."""
+        begin = self.pos - 1
+        chunks = []
+        append = chunks.append
+        content = self.content
+        first = content[begin]
+        if first == '\\':
+            char = self._scan_escape(begin)
+            if not _is_identifier_start(char):
+                raise Error(
+                    "Invalid escape in unquoted key", content, begin)
+            append(char)
+        else:
+            if not _is_identifier_start(first):
+                raise Error("Expecting property name", content, self.pos)
+            append(first)
+        while self.pos < self.end:
+            char = content[self.pos]
+            if char == '\\':
+                self.pos += 1
+                char = self._scan_escape(begin)
+                if not _is_identifier_continue(char):
+                    raise Error(
+                        "Invalid escape in unquoted key", content, begin)
+                append(char)
+            else:
+                if not _is_identifier_continue(char):
+                    break
+                append(char)
+                self.pos += 1
+        return u('').join(chunks)
 
     def parse_object(self):
         # Backwards compatibility
@@ -296,17 +396,16 @@ class DirtyJSONLoader(object):
             if nextchar == '}':
                 break
             key_pos = self._current_position(-len(nextchar))
+            key_start = self.pos - 1
             if nextchar == '"' or nextchar == "'":
                 key = self.parse_string(nextchar)
             else:
-                chunk = UNQUOTED_KEYNAME.match(self.content, self.pos - 1)
-                if chunk is None:
-                    raise Error(
-                        "Expecting property name",
-                        self.content, self.pos)
-                self.pos = chunk.end()
-                key = chunk.groups()[0]
+                key = self.parse_identifier_key()
             key = memo_get(key, key)
+
+            if key in obj and self.duplicate_key_policy == DUPLICATE_KEY_ERROR:
+                raise Error(
+                    "Duplicate key %r" % key, self.content, key_start)
 
             # To skip some function call overhead we optimize the fast paths where
             # the JSON key separator is ": " or just ":".
@@ -316,7 +415,11 @@ class DirtyJSONLoader(object):
             self._skip_whitespace()
             key_value_pos = KeyValuePosition(key_pos, self._current_position())
             value = self.scan()
-            obj.add_with_attributes(key, value, key_value_pos)
+            # Two different spellings that decode to the same key string are
+            # the same key, so a duplicate is handled by the declared policy
+            # instead of being stored as unrelated data.
+            if key not in obj or self.duplicate_key_policy != DUPLICATE_KEY_USE_FIRST:
+                obj.add_with_attributes(key, value, key_value_pos)
 
             nextchar = self._next_character_after_whitespace()
             if nextchar == '}':
