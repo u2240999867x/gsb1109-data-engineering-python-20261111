@@ -16,6 +16,7 @@ Welcome to the agate cookbook, a source of how-to's and use cases.
     cookbook/search
     cookbook/standardize
     cookbook/statistics
+    cookbook/reconcile
     cookbook/compute
     cookbook/datetime
     cookbook/sql

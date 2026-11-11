@@ -64,6 +64,7 @@ Calculating new data
 
     agate.Table.aggregate
     agate.Table.compute
+    agate.Table.run
 
 Advanced processing
 -------------------

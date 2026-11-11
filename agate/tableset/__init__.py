@@ -165,6 +165,7 @@ from agate.tableset.having import having
 from agate.tableset.line_chart import line_chart
 from agate.tableset.merge import merge
 from agate.tableset.print_structure import print_structure
+from agate.tableset.run_check import run
 from agate.tableset.proxy_methods import (bins, compute, denormalize, distinct, exclude, find, group_by, homogenize,
                                           join, limit, normalize, order_by, pivot, select, where)
 from agate.tableset.scatterplot import scatterplot
@@ -193,6 +194,7 @@ TableSet.normalize = normalize
 TableSet.order_by = order_by
 TableSet.pivot = pivot
 TableSet.print_structure = print_structure
+TableSet.run = run
 TableSet.scatterplot = scatterplot
 TableSet.select = select
 TableSet.to_csv = to_csv

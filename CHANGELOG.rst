@@ -1,6 +1,7 @@
 1.14.3 - Unreleased
 -------------------
 
+- feat: Added :class:`.Check` and :class:`.Balance` for declaring reconciliation relationships between metrics, with :meth:`.Table.run` and :meth:`.TableSet.run` entry points. Checks evaluate every group independently, report the participating values and signed difference, require an explicit tolerance, and treat groups missing from a table as failures rather than zero.
 - feat: :class:`.Median`, :class:`.Percentiles`, :class:`.Quartiles`, :class:`.Quintiles`, :class:`.Deciles` and :class:`.IQR` can be applied to :class:`.TimeDelta` columns, like :class:`.Sum` and :class:`.Mean`.
 - fix: :meth:`.Table.distinct` now deduplicates rows when ``key`` is a sequence of column names.
 - fix: :class:`.Rank` ranks null values last when ``reverse=True``.

@@ -48,6 +48,7 @@ Processing
     agate.TableSet.aggregate
     agate.TableSet.having
     agate.TableSet.merge
+    agate.TableSet.run
 
 Previewing
 ----------

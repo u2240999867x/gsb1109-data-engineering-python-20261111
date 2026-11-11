@@ -12,6 +12,7 @@ API
     api/type_tester
     api/aggregations
     api/computations
+    api/checks
     api/csv
     api/fixed
     api/misc

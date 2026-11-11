@@ -326,6 +326,7 @@ from agate.table.print_html import print_html
 from agate.table.print_structure import print_structure
 from agate.table.print_table import print_table
 from agate.table.rename import rename
+from agate.table.run_check import run
 from agate.table.scatterplot import scatterplot
 from agate.table.select import select
 from agate.table.to_csv import to_csv
@@ -359,6 +360,7 @@ Table.print_html = print_html
 Table.print_structure = print_structure
 Table.print_table = print_table
 Table.rename = rename
+Table.run = run
 Table.scatterplot = scatterplot
 Table.select = select
 Table.to_csv = to_csv
