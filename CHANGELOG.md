@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in source-range tracking for `parse`/`loads`/`load`/`TOMLFile.read` via `track_sources=True`. Parsed items and keys then expose `range`/`ranges`/`original_ranges()`/`is_range_valid()`; character offsets (zero-based, half-open) are the canonical coordinates, with `byte_offset()`/`SourceRange.byte_slice()` converting to UTF-8 bytes. Multiline strings, dotted keys, out-of-order tables and arrays of tables report their real (possibly discontinuous) spans instead of a single fabricated range. Items created or edited afterwards report no live range, while their original spans remain inspectable. Tracking is off by default so ordinary parsing builds no index.
+
 ### Changed
 
 - Speed up repeated array appends by keeping existing indexes instead of rebuilding them.

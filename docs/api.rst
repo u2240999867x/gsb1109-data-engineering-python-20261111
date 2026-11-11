@@ -53,3 +53,14 @@ TOML Exceptions
 .. automodule:: tomlkit.exceptions
    :members:
    :show-inheritance:
+
+Source Ranges
+-------------
+
+Optional source-span records produced by ``parse(..., track_sources=True)``.
+Offsets are character based; use ``byte_offset`` / ``SourceRange.byte_slice``
+for UTF-8 byte coordinates.
+
+.. automodule:: tomlkit.source
+   :members: Position, SourceRange, SourceTracker, byte_offset
+   :show-inheritance:

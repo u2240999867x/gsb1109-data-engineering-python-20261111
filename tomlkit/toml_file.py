@@ -26,8 +26,13 @@ class TOMLFile:
         self._path = path
         self._linesep: str = os.linesep
 
-    def read(self) -> TOMLDocument:
-        """Read the file content as a :class:`tomlkit.toml_document.TOMLDocument`."""
+    def read(self, *, track_sources: bool = False) -> TOMLDocument:
+        """Read the file content as a :class:`tomlkit.toml_document.TOMLDocument`.
+
+        :param track_sources: opt in to recording source spans, forwarded to
+            :func:`tomlkit.loads`. The spans describe the (normalized,
+            line-ending-adjusted) text that is actually parsed.
+        """
         with open(self._path, encoding="utf-8", newline="") as f:
             content = f.read()
 
@@ -43,7 +48,7 @@ class TOMLFile:
                 else:
                     self._linesep = "mixed"
 
-            return loads(content)
+            return loads(content, track_sources=track_sources)
 
     def write(self, data: TOMLDocument) -> None:
         """Write the TOMLDocument to the file."""

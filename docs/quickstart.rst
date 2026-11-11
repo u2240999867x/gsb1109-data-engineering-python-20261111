@@ -91,6 +91,69 @@ table. Read the comment with ``trivia.comment`` and update it with ``comment()``
     [database]
     enabled = false # Updated database comment
 
+Source ranges
+~~~~~~~~~~~~~
+
+For editor-style tooling, :func:`tomlkit.parse` can record where each parsed
+item and key came from. Tracking is opt-in, so ordinary parsing keeps its
+normal speed and memory profile; only ``track_sources=True`` builds the line
+index used to resolve positions::
+
+    >>> from tomlkit import parse
+    >>> content = 'a = 1\ns = """\nmulti\nline"""\n'
+    >>> doc = parse(content, track_sources=True)
+
+    >>> doc["a"].range
+    SourceRange(start=Position(index=4, line=1, column=4), end=Position(index=5, line=1, column=5))
+    >>> content[doc["a"].range.as_slice()]
+    '1'
+
+Each :class:`~tomlkit.source.SourceRange` is a half-open ``[start, end)``
+span. The coordinates are:
+
+* ``index``: zero-based **character** offset into the decoded string (Unicode
+  code points, not bytes);
+* ``line``: one-based physical line number (both ``\n`` and ``\r\n`` end a
+  line);
+* ``column``: zero-based character offset within the line, with a tab counted
+  as one character.
+
+Byte-oriented callers can convert a span to UTF-8 offsets without storing a
+second index per item::
+
+    >>> content[doc["s"].range.as_slice()]
+    '"""\nmulti\nline"""'
+    >>> content.encode("utf-8")[doc["s"].range.byte_slice(content)]
+    b'"""\nmulti\nline"""'
+
+A multiline string therefore naturally gets a range spanning several lines.
+
+Discontinuous source is represented by several ranges rather than one
+fabricated span. A dotted key keeps a location per fragment; a table declared
+in multiple places exposes one span per declaration through
+:class:`~tomlkit.container.OutOfOrderTableProxy`; and an array of tables
+exposes every ``[[header]]``::
+
+    >>> aot_source = "[[fruit]]\nname = 'a'\n[[fruit]]\nname = 'b'\n"
+    >>> doc = parse(aot_source, track_sources=True)
+    >>> [aot_source[r.as_slice()] for r in doc["fruit"].ranges]
+    ['[[fruit]]', '[[fruit]]']
+
+An item that was created or edited after parsing has no original location.
+``range`` is ``None`` in that case, while ``original_ranges()`` still returns
+the spans recorded at parse time (if any) so callers can tell "never had a
+location" apart from "its location is stale"::
+
+    >>> doc = parse("a = 1\n", track_sources=True)
+    >>> old = doc["a"]
+    >>> doc["a"] = 9
+    >>> old.range is None
+    True
+    >>> old.original_ranges()
+    (SourceRange(...),)
+    >>> doc["a"].range is None
+    True
+
 Writing
 -------
 

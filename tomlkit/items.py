@@ -34,6 +34,7 @@ from tomlkit._utils import escape_string
 from tomlkit._utils import validate_comment
 from tomlkit.exceptions import ConvertError
 from tomlkit.exceptions import InvalidStringError
+from tomlkit.source import SourceRange
 
 
 if TYPE_CHECKING:
@@ -309,6 +310,70 @@ _BARE_CR = re.compile(r"\r(?!\n)")
 _BARE_KEY_CHARS = frozenset(string.ascii_letters + string.digits + "-_")
 
 
+class _RangeHolder:
+    """Shared source-span storage for items and keys.
+
+    The recorded spans are never synthesized: they are attached only by the
+    parser of a tracked document, so an item built through the public
+    constructors (or produced by an edit) starts with no spans. Three states
+    are distinguishable through the accessors:
+
+    * ``original_ranges()`` empty — the item has no source origin (it was
+      created in code rather than parsed);
+    * spans present and :meth:`is_range_valid` — they still describe the
+      parsed text;
+    * spans present but invalid — an edit made the recorded location stale,
+      so :meth:`range` / :meth:`ranges` report nothing while the original
+      spans remain inspectable.
+    """
+
+    # Storage is a class-level default so an untracked parse allocates nothing
+    # per item: only ``add_range()`` creates the per-instance list.
+    _ranges: list[SourceRange] | None = None
+    _range_valid: bool = True
+
+    def add_range(self, source_range: SourceRange) -> None:
+        """Attach a source span recorded by the parser.
+
+        Discontinuous source (dotted keys, multiply-declared tables) is
+        represented by calling this more than once instead of merging the
+        gaps into a single span.
+        """
+        if self._ranges is None:
+            self._ranges = []
+        self._ranges.append(source_range)
+        self._range_valid = True
+
+    def invalidate_range(self) -> None:
+        """Mark every recorded span as stale.
+
+        The originally recorded spans are retained for inspection but no
+        longer reported as live locations.
+        """
+        if self._ranges:
+            self._range_valid = False
+
+    def is_range_valid(self) -> bool:
+        """Whether live source spans are available."""
+        return self._range_valid and bool(self._ranges)
+
+    def original_ranges(self) -> tuple[SourceRange, ...]:
+        """The spans as recorded at parse time, even if now stale."""
+        return tuple(self._ranges) if self._ranges is not None else ()
+
+    @property
+    def ranges(self) -> tuple[SourceRange, ...]:
+        """Every live span of discontinuous source, in source order."""
+        if self._range_valid and self._ranges is not None:
+            return tuple(self._ranges)
+        return ()
+
+    @property
+    def range(self) -> SourceRange | None:
+        """The first live source span, or ``None`` when there is none."""
+        return self._ranges[0] if self._range_valid and self._ranges else None
+
+
 class StringType(Enum):
     # Single Line Basic
     SLB = '"'
@@ -428,7 +493,7 @@ class KeyType(Enum):
     Literal = "'"
 
 
-class Key(abc.ABC):
+class Key(abc.ABC, _RangeHolder):
     """Base class for a key"""
 
     sep: str
@@ -539,6 +604,11 @@ class DottedKey(Key):
         self._original = original
         self._dotted = False
         self.key = ".".join(k.key for k in self._keys)
+        # A dotted key's fragments are each located separately in the source;
+        # carry their live spans over so the composite key keeps every fragment.
+        for fragment in self._keys:
+            for source_range in fragment.ranges:
+                self.add_range(source_range)
 
     def __hash__(self) -> int:
         return hash(tuple(self._keys))
@@ -547,7 +617,7 @@ class DottedKey(Key):
         return isinstance(__o, DottedKey) and self._keys == __o._keys
 
 
-class Item:
+class Item(_RangeHolder):
     """
     An item within a TOML document.
     """
@@ -1675,12 +1745,17 @@ class Array(Item, _CustomList):  # type: ignore[type-arg]
         else:
             self._value.extend(self._group_values(new_values))
         self._reindex()
+        self.invalidate_range()
 
     def clear(self) -> None:
         """Clear the array."""
+        for group in self._value:
+            if group.value is not None:
+                group.value.invalidate_range()
         list.clear(self)
         self._index_map.clear()
         self._value.clear()
+        self.invalidate_range()
 
     def __len__(self) -> int:
         return list.__len__(self)
@@ -1695,10 +1770,16 @@ class Array(Item, _CustomList):  # type: ignore[type-arg]
         if isinstance(key, slice):
             raise ValueError("slice assignment is not supported")
         it = item(value, _parent=self)
+        # Read the previous value first so an out-of-range index still raises
+        # IndexError (from the list) rather than a KeyError from _index_map.
+        old = list.__getitem__(self, key)
+        old.invalidate_range()
         list.__setitem__(self, key, it)
         if key < 0:
             key += len(self)
         self._value[self._index_map[key]].value = it
+        # The enclosing ``[...]`` token changed, so its own span is stale.
+        self.invalidate_range()
 
     def insert(self, pos: int, value: Any) -> None:  # type: ignore[override]
         it = item(value, _parent=self)
@@ -1766,6 +1847,7 @@ class Array(Item, _CustomList):  # type: ignore[type-arg]
             self._index_map[length] = idx
         else:
             self._reindex()
+        self.invalidate_range()
 
     def __delitem__(self, key: int | slice) -> None:  # type: ignore[override]
         length = len(self)
@@ -1783,6 +1865,8 @@ class Array(Item, _CustomList):  # type: ignore[type-arg]
                     raise IndexError("list index out of range") from e
             else:
                 group_rm = self._value[idx]
+                if group_rm.value is not None:
+                    group_rm.value.invalidate_range()
                 del self._value[idx]
                 if (
                     idx == 0
@@ -1837,6 +1921,7 @@ class Array(Item, _CustomList):  # type: ignore[type-arg]
                 v.comma = None
 
         self._reindex()
+        self.invalidate_range()
 
     def _getstate(self, protocol: int = 3) -> tuple[list[Item], Trivia, bool]:
         return list(self._iter_items()), self._trivia, self._multiline
@@ -2422,6 +2507,38 @@ class AoT(Item, _CustomList):  # type: ignore[type-arg]
     def body(self) -> list[Table]:
         return self._body
 
+    def original_ranges(self) -> tuple[SourceRange, ...]:
+        """Every element's header span, including ones whose element is stale."""
+        ranges: list[SourceRange] = []
+        for table in self._body:
+            ranges.extend(table.original_ranges())
+        return tuple(ranges)
+
+    @property
+    def ranges(self) -> tuple[SourceRange, ...]:
+        """The live ``[[header]]`` spans of every element.
+
+        Aggregated from the element tables on demand, so adding or removing an
+        element only changes the spans that belong to it; it follows the same
+        discontinuous-source rule as the out-of-order table proxy.
+        """
+        return tuple(
+            source_range for table in self._body for source_range in table.ranges
+        )
+
+    @property
+    def range(self) -> SourceRange | None:
+        """The first live element header span, or ``None`` if none remain."""
+        for table in self._body:
+            first = table.range
+            if first is not None:
+                return first
+        return None
+
+    def is_range_valid(self) -> bool:
+        """Whether at least one element still has a live header span."""
+        return any(table.is_range_valid() for table in self._body)
+
     @property
     def discriminant(self) -> int:
         return 12
@@ -2444,13 +2561,18 @@ class AoT(Item, _CustomList):  # type: ignore[type-arg]
 
     def __setitem__(self, key: slice | int, value: Any) -> None:  # type: ignore[override]
         if isinstance(key, slice):
+            for old in self._body[key]:
+                old.invalidate_range()
             value = [item(v, _parent=self) for v in value]
         else:
+            self._body[key].invalidate_range()
             value = item(value, _parent=self)
         self._body[key] = value
         list.__setitem__(self, key, value)
 
     def __delitem__(self, key: slice | int) -> None:  # type: ignore[override]
+        for old in self._body[key] if isinstance(key, slice) else [self._body[key]]:
+            old.invalidate_range()
         del self._body[key]
         list.__delitem__(self, key)
 

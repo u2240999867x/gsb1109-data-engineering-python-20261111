@@ -46,13 +46,13 @@ if TYPE_CHECKING:
     E = TypeVar("E", bound=Encoder)
 
 
-def loads(string: str | bytes) -> TOMLDocument:
+def loads(string: str | bytes, *, track_sources: bool = False) -> TOMLDocument:
     """
     Parses a string into a TOMLDocument.
 
     Alias for parse().
     """
-    return parse(string)
+    return parse(string, track_sources=track_sources)
 
 
 def dumps(data: Mapping[str, Any], sort_keys: bool = False) -> str:
@@ -79,11 +79,13 @@ def dumps(data: Mapping[str, Any], sort_keys: bool = False) -> str:
         raise TypeError(msg) from ex
 
 
-def load(fp: IO[str] | IO[bytes]) -> TOMLDocument:
+def load(fp: IO[str] | IO[bytes], *, track_sources: bool = False) -> TOMLDocument:
     """
     Load toml document from a file-like object.
+
+    Source spans always refer to the decoded text read from ``fp``.
     """
-    return parse(fp.read())
+    return parse(fp.read(), track_sources=track_sources)
 
 
 def dump(data: Mapping[str, Any], fp: IO[str], *, sort_keys: bool = False) -> None:
@@ -101,11 +103,20 @@ def dump(data: Mapping[str, Any], fp: IO[str], *, sort_keys: bool = False) -> No
     fp.write(dumps(data, sort_keys=sort_keys))
 
 
-def parse(string: str | bytes) -> TOMLDocument:
+def parse(string: str | bytes, *, track_sources: bool = False) -> TOMLDocument:
     """
     Parses a string or bytes into a TOMLDocument.
+
+    :param track_sources: when ``True``, every parsed item and key records the
+        character span(s) it occupied in the original text, retrievable through
+        :attr:`tomlkit.items.Item.range` and :attr:`tomlkit.items.Item.ranges`.
+        Tracking is opt-in: leaving it off (the default) parses without building
+        any span index, so ordinary parsing keeps its normal memory and time
+        profile. Items created or changed afterwards never receive a fabricated
+        span; their ranges are reported as ``None`` until the document is parsed
+        again.
     """
-    return Parser(string).parse()
+    return Parser(string, track_sources=track_sources).parse()
 
 
 def document() -> TOMLDocument:

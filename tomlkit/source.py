@@ -1,9 +1,165 @@
 from __future__ import annotations
 
+import bisect
+import dataclasses
+
 from typing import Any
 
 from tomlkit.exceptions import ParseError
 from tomlkit.exceptions import UnexpectedCharError
+
+
+def byte_offset(source: str, index: int) -> int:
+    """UTF-8 byte offset of a character offset in ``source``.
+
+    ``SourceRange`` stores *character* offsets, which index the decoded
+    ``str`` directly. Editors and protocol clients that work on UTF-8 bytes
+    can convert with this helper: ``source.encode("utf-8")`` sliced at the
+    returned offsets covers exactly the same text as ``source[index:]``.
+
+    The conversion is O(index); ranges expose :meth:`SourceRange.byte_slice`
+    for convenience. The offsets always address the decoded ``str``, so encode
+    that string as UTF-8 before slicing bytes with them.
+    """
+    if index < 0:
+        raise ValueError("byte_offset() requires a non-negative index")
+    return len(source[:index].encode("utf-8"))
+
+
+@dataclasses.dataclass(frozen=True)
+class Position:
+    """A single cursor position inside the parsed source text.
+
+    Coordinate conventions (the same ones used by parse errors):
+
+    * ``index`` is a zero-based Python character offset. It counts Unicode
+      code points, so it is a valid index into the decoded ``str`` given to
+      :func:`tomlkit.parse`. It is *not* a byte offset: to address a UTF-8
+      buffer, convert it with :func:`byte_offset` (or
+      :meth:`SourceRange.byte_slice`).
+    * ``line`` is one-based and counts physical lines (the first line is
+      ``1``). Both ``\\n`` and ``\\r\\n`` terminate a line.
+    * ``column`` is zero-based and counts characters from the start of the
+      line. A tab counts as one character, matching the parser's own error
+      reporting.
+
+    A position always describes the boundary *before* the character at
+    ``index``; the end of an N-character document is therefore
+    ``index == N`` rather than an out-of-range offset.
+    """
+
+    index: int
+    line: int
+    column: int
+
+    def __lt__(self, other: Position) -> bool:
+        if not isinstance(other, Position):
+            return NotImplemented
+        return self.index < other.index
+
+
+@dataclasses.dataclass(frozen=True)
+class SourceRange:
+    """A half-open ``[start, end)`` span of the original source text.
+
+    All offsets are zero-based Python character offsets into the decoded
+    source string; ``start.index`` is the first character of the span and
+    ``end.index`` is the first character *after* it, so slicing the source
+    with ``source[start.index:end.index]`` reproduces the covered text. These
+    are character offsets, not byte offsets: for a UTF-8 view use
+    :meth:`byte_slice`, which converts both ends with :func:`byte_offset`.
+
+    ``start`` and ``end`` follow the :class:`Position` conventions: lines are
+    one-based, columns zero-based. A span may cover several lines (for
+    example a multiline string); in that case ``end.line`` is greater than
+    ``start.line`` and ``end.column`` is measured from the start of the end
+    line.
+
+    Ranges are immutable snapshots. They describe the text as it was parsed,
+    not the current serialization of an edited document: once the document
+    changes, a previously recorded range is stale. Callers distinguish a
+    live range from a stale one through :meth:`tomlkit.items.Item.range`,
+    which returns ``None`` for items that have no (longer any) source span.
+    """
+
+    start: Position
+    end: Position
+
+    def as_slice(self) -> slice:
+        """The character slice equivalent of this range."""
+        return slice(self.start.index, self.end.index)
+
+    def byte_slice(self, source: str) -> slice:
+        """The UTF-8 byte slice equivalent of this range in ``source``.
+
+        ``source.encode("utf-8")[source_range.byte_slice(source)]`` covers
+        the same text as ``source[source_range.as_slice()]``.
+        """
+        return slice(
+            byte_offset(source, self.start.index),
+            byte_offset(source, self.end.index),
+        )
+
+    def __str__(self) -> str:
+        return (
+            f"{self.start.line}:{self.start.column}-{self.end.line}:{self.end.column}"
+        )
+
+
+class SourceTracker:
+    """Optional bookkeeping that maps parsed items back to source spans.
+
+    A tracker is only constructed when source tracking is explicitly enabled
+    (see :func:`tomlkit.api.parse`'s ``track_sources`` argument). A plain
+    :func:`tomlkit.parse` keeps ``Source._tracker`` at ``None`` and pays none
+    of the cost below: no per-item span storage is allocated, and no line
+    index is built.
+
+    The tracker stores two things:
+
+    * a sorted list of line-start character offsets, shared by every span of
+      the document and built once when tracking is enabled;
+    * the spans themselves, attached to items by the parser as they are
+      created. Discontinuous source (a dotted key, a table declared in several
+      places, an array of tables) is represented by several ranges on the same
+      item rather than one fabricated range covering the gaps.
+    """
+
+    def __init__(self) -> None:
+        self._line_starts: list[int] | None = None
+
+    def build_line_index(self, source: str) -> None:
+        """Record the character offset at which each line starts.
+
+        Runs once per tracked document; afterwards every
+        :meth:`position` call is a binary search instead of a rescan.
+        """
+        starts = [0]
+        for idx, char in enumerate(source):
+            if char == "\n":
+                starts.append(idx + 1)
+            elif char == "\r":
+                # Treat "\r\n" as one terminator: only the following "\n"
+                # opens the next line. A lone "\r" still opens a line of its
+                # own, mirroring the parser's validation semantics.
+                if idx + 1 >= len(source) or source[idx + 1] != "\n":
+                    starts.append(idx + 1)
+        self._line_starts = starts
+
+    def position(self, index: int) -> Position:
+        """Convert a character offset into a :class:`Position`."""
+        if self._line_starts is None:
+            raise RuntimeError(
+                "SourceTracker.build_line_index() must run before position()"
+            )
+        # Rightmost line start not greater than the offset.
+        line = bisect.bisect_right(self._line_starts, index)
+        line_start = self._line_starts[line - 1]
+        return Position(index=index, line=line, column=index - line_start)
+
+    def range(self, start_index: int, end_index: int) -> SourceRange:
+        """Build a half-open :class:`SourceRange` between two offsets."""
+        return SourceRange(self.position(start_index), self.position(end_index))
 
 
 class _State:
@@ -79,7 +235,12 @@ class Source(str):
     # value, so a real NUL byte in the input is not mistaken for EOF.
     EOF = "\0"
 
-    def __init__(self, _: str) -> None:
+    def __new__(cls, _: str, tracker: SourceTracker | None = None) -> Source:
+        # ``str.__new__`` rejects the extra ``tracker`` keyword, so swallow it
+        # here and only forward the textual content.
+        return super().__new__(cls, _)
+
+    def __init__(self, _: str, tracker: SourceTracker | None = None) -> None:
         super().__init__()
 
         # Track an integer index over the underlying str (Source subclasses str):
@@ -88,6 +249,12 @@ class Source(str):
         self._idx = -1  # pre-start sentinel; first inc() will land on 0
         self._marker = 0
         self._current: str = ""
+
+        # Optional source-span bookkeeping. ``None`` on every ordinary parse,
+        # so the hot scanning path stays free of tracking overhead.
+        self._tracker = tracker
+        if tracker is not None:
+            tracker.build_line_index(str(self))
 
         self._state = _StateHandler(self)
 
@@ -115,6 +282,25 @@ class Source(str):
     @property
     def marker(self) -> int:
         return self._marker
+
+    @property
+    def tracker(self) -> SourceTracker | None:
+        """The tracker attached to this source, or ``None`` when untracked."""
+        return self._tracker
+
+    def is_tracking(self) -> bool:
+        """Whether source spans are being recorded for this parse."""
+        return self._tracker is not None
+
+    def make_range(self, start_index: int, end_index: int) -> SourceRange:
+        """Build a :class:`SourceRange` over character offsets.
+
+        Only callable on a tracked source; ordinary parses have no line index
+        and raise :class:`RuntimeError` rather than silently building one.
+        """
+        if self._tracker is None:
+            raise RuntimeError("Source range requested on an untracked parse")
+        return self._tracker.range(start_index, end_index)
 
     def extract(self) -> str:
         """

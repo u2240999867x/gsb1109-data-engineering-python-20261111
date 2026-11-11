@@ -30,11 +30,24 @@ from tomlkit.items import Table
 from tomlkit.items import Trivia
 from tomlkit.items import Whitespace
 from tomlkit.items import item as _item
+from tomlkit.source import SourceRange
 
 
 def _is_empty_aot(item: Item) -> bool:
     """Whether ``item`` is an array of tables with no elements left."""
     return isinstance(item, AoT) and not item.body
+
+
+def _invalidate_source_range(target: Any) -> None:
+    """Mark a parsed item/key's recorded spans as stale, if it has any.
+
+    Newly constructed items carry no spans, so this is a no-op for them. The
+    originally recorded spans remain reachable through
+    ``original_ranges()``; only the live ``range``/``ranges`` view is cleared.
+    """
+    invalidate = getattr(target, "invalidate_range", None)
+    if callable(invalidate):
+        invalidate()
 
 
 def _emits_header(key: Key, table: Table) -> bool:
@@ -211,6 +224,15 @@ class Container(_CustomDict):  # type: ignore[type-arg]
             raise TOMLKitError("Can't add a table to a dotted key")
         name, *mid, last = key
         name._dotted = True
+        # A dotted key spans several fragments in the source. Each fragment
+        # has its own recorded location; merge them onto the key object that
+        # is actually stored (the fragments themselves keep their own spans in
+        # the generated super tables), so the composite key can report the
+        # discontinuous source as a whole. A key created in code has no spans,
+        # so nothing is synthesized.
+        for source_range in key.ranges:
+            if source_range not in name.ranges:
+                name.add_range(source_range)
         table = current = Table(Container(True), Trivia(), False, is_super_table=True)
         for _name in mid:
             _name._dotted = True
@@ -556,6 +578,9 @@ class Container(_CustomDict):  # type: ignore[type-arg]
         if index is None:
             raise NonExistentKey(key)
         self._validation_cache.clear()
+        removed_item = self._body[idx][1]
+        _invalidate_source_range(removed_item)
+        _invalidate_source_range(key)
         self._body[idx] = (None, Null())
 
         if isinstance(index, tuple):
@@ -580,10 +605,15 @@ class Container(_CustomDict):  # type: ignore[type-arg]
 
         self._validation_cache.clear()
         if isinstance(idx, tuple):
-            for i in idx:
-                self._body[i] = (None, Null())
+            indices = idx
         else:
-            self._body[idx] = (None, Null())
+            indices = (idx,)
+        for i in indices:
+            old_key, old_item = self._body[i]
+            _invalidate_source_range(old_item)
+            if old_key is not None:
+                _invalidate_source_range(old_key)
+            self._body[i] = (None, Null())
 
         dict.__delitem__(self, key.key)
 
@@ -996,6 +1026,12 @@ class Container(_CustomDict):  # type: ignore[type-arg]
                 value.trivia.comment_ws = value.trivia.comment_ws or v.trivia.comment_ws
                 value.trivia.comment = value.trivia.comment or v.trivia.comment
                 value.trivia.trail = v.trivia.trail
+            # The old token no longer exists at its recorded location. A brand
+            # new key inherits nothing; when the old key object is reused it
+            # stays valid because the key text itself is unchanged.
+            _invalidate_source_range(v)
+            if new_key is not k:
+                _invalidate_source_range(k)
             self._body[idx] = (new_key, value)
 
         if value is not v and hasattr(value, "invalidate_display_name"):
@@ -1188,6 +1224,38 @@ class OutOfOrderTableProxy(_CustomDict):  # type: ignore[type-arg]
 
     def unwrap(self) -> dict[str, Any]:
         return self._internal_container.unwrap()
+
+    def original_ranges(self) -> tuple[SourceRange, ...]:
+        """Every fragment's header span, including ones now stale.
+
+        Aggregated on demand from the live fragment tables rather than copied
+        at construction, so it stays correct as fragments are added, removed or
+        invalidated by later edits.
+        """
+        ranges: list[SourceRange] = []
+        for table in self._tables:
+            ranges.extend(table.original_ranges())
+        return tuple(ranges)
+
+    @property
+    def ranges(self) -> tuple[SourceRange, ...]:
+        """The live header spans of every fragment making up this table."""
+        return tuple(
+            source_range for table in self._tables for source_range in table.ranges
+        )
+
+    @property
+    def range(self) -> SourceRange | None:
+        """The first live fragment header span, or ``None`` if none remain."""
+        for table in self._tables:
+            first = table.range
+            if first is not None:
+                return first
+        return None
+
+    def is_range_valid(self) -> bool:
+        """Whether at least one fragment still has a live header span."""
+        return any(table.is_range_valid() for table in self._tables)
 
     @property
     def value(self) -> dict[str, Any]:

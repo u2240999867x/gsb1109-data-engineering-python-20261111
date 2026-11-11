@@ -47,6 +47,7 @@ from tomlkit.items import Time
 from tomlkit.items import Trivia
 from tomlkit.items import Whitespace
 from tomlkit.source import Source
+from tomlkit.source import SourceTracker
 from tomlkit.source import _StateHandler
 from tomlkit.toml_document import TOMLDocument
 
@@ -100,12 +101,30 @@ class Parser:
     # adds a level of nested containers. Refuse documents beyond this depth.
     MAX_NESTING_DEPTH = 100
 
-    def __init__(self, string: str | bytes) -> None:
+    def __init__(self, string: str | bytes, track_sources: bool = False) -> None:
         # Input to parse
-        self._src = Source(decode(string))
+        tracker = SourceTracker() if track_sources else None
+        self._src = Source(decode(string), tracker=tracker)
+        # Cached so the hot value/key paths only pay an attribute comparison,
+        # never a method call, when tracking is off.
+        self._tracking_enabled = tracker is not None
 
         self._aot_stack: list[Key] = []
         self._nesting_depth = 0
+
+    def _tracking(self) -> bool:
+        """Whether this parse records source spans."""
+        return self._tracking_enabled
+
+    def _attach_range(self, target: Any, start_index: int, end_index: int) -> None:
+        """Attach a source span to an item or key.
+
+        Only reached from paths that already checked ``_tracking_enabled``;
+        the guard remains for safety without building a range on an untracked
+        parse.
+        """
+        if self._tracking_enabled:
+            target.add_range(self._src.make_range(start_index, end_index))
 
     @property
     def _state(self) -> _StateHandler:
@@ -447,22 +466,29 @@ class Parser:
         if key_type is None:
             raise RuntimeError("Should not have entered _parse_quoted_key()")
 
+        key_start = self._idx
         key_str = self._parse_string(
             StringType.SLB if key_type == KeyType.Basic else StringType.SLL
         )
         if key_str._t.is_multiline():
             raise self.parse_error(UnexpectedCharError, key_str._t.value)
+        key_end = self._idx
         original += key_str.as_string()
         self.mark()
         self._src.advance_while(_SPACES)
         original += self.extract()
 
-        return SingleKey(str(key_str), t=key_type, sep="", original=original)
+        single_key = SingleKey(str(key_str), t=key_type, sep="", original=original)
+        if self._tracking_enabled:
+            self._attach_range(single_key, key_start, key_end)
+
+        return single_key
 
     def _parse_bare_key(self) -> Key:
         """
         Parses a bare key.
         """
+        key_start = self._idx
         self._src.advance_while(_BARE_KEY_OR_SPACE)
 
         original = self.extract()
@@ -475,12 +501,30 @@ class Parser:
             # Bare key with whitespace in it
             raise self.parse_error(ParseError, f'Invalid key "{key_s}"')
 
-        return SingleKey(key_s, KeyType.Bare, "", original)
+        key = SingleKey(key_s, KeyType.Bare, "", original)
+        # Span the bare token itself: leading whitespace was already consumed by
+        # _parse_simple_key(), and any whitespace before ``=`` is not part of
+        # the key, so stop at the (stripped) token length rather than the full
+        # run.
+        if self._tracking_enabled:
+            self._attach_range(key, key_start, key_start + len(key_s))
+        return key
 
     def _parse_value(self) -> Item:
         """
         Attempts to parse a value at the current position.
         """
+        # The span wraps the whole token (quotes, brackets and all), so a
+        # multiline string naturally records a multi-line range. Recording at
+        # this boundary also covers every leaf type without touching each
+        # branch, and nested values are still spanned by their own calls.
+        start = self._idx
+        item = self._parse_value_token()
+        if self._tracking_enabled:
+            self._attach_range(item, start, self._idx)
+        return item
+
+    def _parse_value_token(self) -> Item:
         self.mark()
         c = self._current
         trivia = Trivia()
@@ -1019,6 +1063,7 @@ class Parser:
             )
 
         indent = self.extract()
+        header_start = self._idx
         self.inc()  # Skip opening bracket
 
         if self.end():
@@ -1069,9 +1114,18 @@ class Parser:
 
             self.inc()  # Skip second closing bracket
 
+        header_end = self._idx
+        header_range = (
+            self._src.make_range(header_start, header_end) if self._tracking() else None
+        )
+
         cws, comment, trail = self._parse_comment_trail()
 
         result: Table | AoT = Null()  # type: ignore[assignment]
+        # Set only for a dotted header that also builds a root fragment table
+        # (e.g. ``[a.x]``); stays None for a single-segment header where the
+        # leaf table is itself the returned element.
+        root_fragment: Table | None = None
         table = Table(
             values,
             Trivia(indent, cws, comment, trail),
@@ -1097,6 +1151,7 @@ class Parser:
                 )
 
             result = table
+            root_fragment = table
             key = name_parts[0]
 
             for i, _name in enumerate(name_parts[1:]):
@@ -1124,6 +1179,15 @@ class Parser:
         else:
             if name_parts:
                 key = name_parts[0]
+
+        # The header span belongs to the leaf table actually opened by this
+        # header. When a dotted header (e.g. ``[a.x]``) also created a root
+        # fragment, attach it there as well so an out-of-order proxy can
+        # reassemble the (possibly several) declarations of one logical table.
+        if header_range is not None:
+            table.add_range(header_range)
+            if root_fragment is not None and root_fragment is not table:
+                root_fragment.add_range(header_range)
 
         while not self.end():
             parsed = self._parse_item()

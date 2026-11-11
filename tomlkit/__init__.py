@@ -25,14 +25,22 @@ from tomlkit.api import time
 from tomlkit.api import unregister_encoder
 from tomlkit.api import value
 from tomlkit.api import ws
+from tomlkit.source import Position
+from tomlkit.source import SourceRange
+from tomlkit.source import SourceTracker
+from tomlkit.source import byte_offset
 
 
 __version__ = "0.15.2"
 __all__ = [
+    "Position",
+    "SourceRange",
+    "SourceTracker",
     "TOMLDocument",
     "aot",
     "array",
     "boolean",
+    "byte_offset",
     "comment",
     "date",
     "datetime",
