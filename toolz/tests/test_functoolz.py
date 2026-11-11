@@ -484,6 +484,88 @@ def test_curry_bind():
     assert add.bind(x=10).bind(y=20)() == add(10, 20)
 
 
+def test_curry_preflight():
+    from toolz.functoolz import CurryStatus
+
+    calls = []
+
+    def add(x, y):
+        calls.append((x, y))
+        return x + y
+
+    # Incomplete and complete bindings are both PENDING
+    assert curry(add).preflight() is CurryStatus.PENDING
+    assert curry(add, 1).preflight() is CurryStatus.PENDING
+    assert curry(add, 1, y=2).preflight() is CurryStatus.PENDING
+    # A misspelled keyword is caught before any record is processed
+    assert curry(add, 1, y3=2).preflight() is CurryStatus.INVALID
+    assert curry(add, 1).preflight(y3=2) is CurryStatus.INVALID
+    # Too many positional arguments can never become valid
+    assert curry(add, 1).preflight(2, 3) is CurryStatus.INVALID
+    # Extra arguments passed to preflight are checked hypothetically
+    assert curry(add, 1).preflight(2) is CurryStatus.PENDING
+    # The function is never called
+    assert calls == []
+    # Lazy behavior is unchanged: bad keywords still raise on call
+    assert raises(TypeError, lambda: curry(add, 1, y3=2)(1))
+
+
+def test_curry_preflight_positional_only():
+    from toolz.functoolz import CurryStatus
+
+    def f(x, y, /, z=3):
+        return x + y + z
+
+    assert curry(f, 1).preflight() is CurryStatus.PENDING
+    assert curry(f, 1, 2).preflight() is CurryStatus.PENDING
+    assert curry(f, 1).preflight(x=2) is CurryStatus.INVALID
+    assert curry(f, 1, y=2).preflight() is CurryStatus.INVALID
+    assert curry(f, 1).preflight(z=3) is CurryStatus.PENDING
+
+
+def test_curry_preflight_bound_method():
+    from toolz.functoolz import CurryStatus
+
+    class Adder:
+        def method(self, x, y=1):
+            return x + y
+
+    assert curry(Adder().method).preflight() is CurryStatus.PENDING
+    assert curry(Adder().method, 1).preflight() is CurryStatus.PENDING
+    assert curry(Adder().method, 1).preflight(z=2) is CurryStatus.INVALID
+    assert curry(Adder().method, 1, 2, 3).preflight() is CurryStatus.INVALID
+
+
+def test_curry_preflight_varargs():
+    from toolz.functoolz import CurryStatus
+
+    def f(x, *args):
+        return x, args
+
+    assert curry(f).preflight() is CurryStatus.PENDING
+    assert curry(f, 1, 2, 3).preflight(4, 5) is CurryStatus.PENDING
+    assert curry(f, 1).preflight(x=2) is CurryStatus.INVALID
+
+
+def test_curry_preflight_unknown_signature():
+    from toolz.functoolz import CurryStatus
+
+    class NoSig:
+        @property
+        def __signature__(self):
+            raise ValueError('no signature')
+
+        def __call__(self, x):
+            return x
+
+    # Unknown signatures are not guessed as valid
+    assert curry(NoSig()).preflight() is CurryStatus.UNKNOWN
+    assert curry(NoSig()).preflight(1, bad=2) is CurryStatus.UNKNOWN
+    # Builtins known to the signature registry are still checked
+    assert curry(map).preflight() is CurryStatus.PENDING
+    assert curry(map, str).preflight() is CurryStatus.PENDING
+
+
 def test_curry_unknown_args():
     def add3(x, y, z):
         return x + y + z

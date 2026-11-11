@@ -35,6 +35,7 @@ from toolz import (
     concatv,
     count,
     curry,
+    CurryStatus,
     diff,
     first,
     flip,

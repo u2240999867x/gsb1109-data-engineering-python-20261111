@@ -1,6 +1,7 @@
 from functools import reduce, partial
 import inspect
 import sys
+from enum import Enum
 from operator import attrgetter, not_
 from importlib import import_module
 from types import MethodType
@@ -13,7 +14,7 @@ if sys.version_info >= (3, 14):
 
 __all__ = ('identity', 'apply', 'thread_first', 'thread_last', 'memoize',
            'compose', 'compose_left', 'pipe', 'complement', 'juxt', 'do',
-           'curry', 'flip', 'excepts')
+           'curry', 'CurryStatus', 'flip', 'excepts')
 
 PYPY = hasattr(sys, 'pypy_version_info')
 
@@ -164,6 +165,26 @@ class InstanceProperty(property):
     def __reduce__(self):
         state = (self.fget, self.fset, self.fdel, self.__doc__, self.classval)
         return InstanceProperty, state
+
+
+class CurryStatus(Enum):
+    """ Tri-state result of ``curry.preflight``
+
+    ``PENDING``
+        The arguments bound so far are consistent with the signature;
+        the call is still waiting for more arguments (or is ready to
+        run as-is).
+    ``INVALID``
+        The current binding can never become a valid call, no matter
+        what arguments are added later (e.g. a misspelled keyword).
+    ``UNKNOWN``
+        The signature of the underlying callable cannot be determined,
+        so the binding cannot be checked.  Unknown is never guessed as
+        valid.
+    """
+    PENDING = 'pending'
+    INVALID = 'invalid'
+    UNKNOWN = 'unknown'
 
 
 class curry:
@@ -336,6 +357,82 @@ class curry:
 
     def bind(self, *args, **kwargs):
         return type(self)(self, *args, **kwargs)
+
+    def preflight(self, *args, **kwargs):
+        """ Check the bound arguments without calling the function
+
+        Returns a ``CurryStatus`` describing the arguments bound so far
+        (plus any extra ``*args`` and ``**kwargs`` given here):
+
+        - ``CurryStatus.PENDING``: the binding is consistent with the
+          signature; keep waiting for more arguments.
+        - ``CurryStatus.INVALID``: the binding can never become a valid
+          call, e.g. a misspelled keyword.  Adding more arguments will
+          not fix it.
+        - ``CurryStatus.UNKNOWN``: the signature cannot be determined,
+          so the binding cannot be checked.  Unknown signatures are
+          never guessed as valid.
+
+        Positional-only parameters, bound methods, and functions with
+        ``*args`` are all handled.  The function is never called, so
+        this is safe to run before any data arrives.
+
+        >>> def add(x, y):
+        ...     return x + y
+        >>> curry(add, 1).preflight() is CurryStatus.PENDING
+        True
+        >>> curry(add, 1, y=2).preflight() is CurryStatus.PENDING
+        True
+        >>> curry(add, 1, y=2, y3=3).preflight() is CurryStatus.INVALID
+        True
+        >>> curry(add, 1).preflight(2, 3) is CurryStatus.INVALID
+        True
+
+        >>> def f(x, y, /, *args):
+        ...     return (x, y) + args
+        >>> curry(f, 1).preflight() is CurryStatus.PENDING
+        True
+        >>> curry(f, 1).preflight(x=2) is CurryStatus.INVALID
+        True
+
+        >>> class Adder:
+        ...     def method(self, x, y=1):
+        ...         return x + y
+        >>> curry(Adder().method, 1).preflight() is CurryStatus.PENDING
+        True
+        >>> curry(Adder().method, 1).preflight(z=2) is CurryStatus.INVALID
+        True
+
+        >>> class NoSig:
+        ...     @property
+        ...     def __signature__(self):
+        ...         raise ValueError('no signature')
+        ...     def __call__(self, x):
+        ...         return x
+        >>> curry(NoSig()).preflight() is CurryStatus.UNKNOWN
+        True
+        """
+        func = self.func
+        args = self.args + args
+        if self.keywords:
+            kwargs = dict(self.keywords, **kwargs)
+        if self._sigspec is None:
+            sigspec = self._sigspec = _sigs.signature_or_spec(func)
+        else:
+            sigspec = self._sigspec
+
+        if isinstance(sigspec, inspect.Signature):
+            try:
+                sigspec.bind_partial(*args, **kwargs)
+            except TypeError:
+                return CurryStatus.INVALID
+            return CurryStatus.PENDING
+        # The signature cannot be determined by ``inspect``; consult the
+        # registry of known builtins instead of guessing.
+        rv = _sigs._is_partial_args(func, args, kwargs)
+        if rv is None:
+            return CurryStatus.UNKNOWN
+        return CurryStatus.PENDING if rv else CurryStatus.INVALID
 
     def call(self, *args, **kwargs):
         return self._partial(*args, **kwargs)
