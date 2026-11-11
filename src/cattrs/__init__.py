@@ -1,6 +1,7 @@
 from typing import Final
 
 from .converters import BaseConverter, Converter, GenConverter, UnstructureStrategy
+from .enums import UnknownEnumValue
 from .errors import (
     AttributeValidationNote,
     BaseValidationError,
@@ -26,6 +27,7 @@ __all__ = [
     "IterableValidationNote",
     "SimpleStructureHook",
     "StructureHandlerNotFoundError",
+    "UnknownEnumValue",
     "UnstructureStrategy",
     "get_structure_hook",
     "get_unstructure_hook",

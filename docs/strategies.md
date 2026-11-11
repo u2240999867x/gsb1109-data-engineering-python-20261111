@@ -393,3 +393,48 @@ This strategy has been preapplied to the following preconfigured converters:
 ```{versionadded} 23.2.0
 
 ```
+
+## Open Enums Strategy
+
+_Found at {py:func}`cattrs.strategies.use_open_enums`._
+
+The _open enums_ strategy makes a converter forward-compatible with enum values it doesn't know about yet, for example values emitted by a newer version of a service.
+
+Known values structure into their members as usual.
+Values with no matching member are preserved as {py:class}`cattrs.UnknownEnumValue`, keeping both the original value and the target enum instead of raising.
+An `UnknownEnumValue` is not an enum member and doesn't compare equal to one, so unknown states can never act like a default member.
+Unstructuring an `UnknownEnumValue` yields the original value again, so unknown states round-trip losslessly.
+
+```{doctest} open_enums
+
+>>> from enum import Enum
+>>> from cattrs import Converter, UnknownEnumValue
+>>> from cattrs.strategies import use_open_enums
+
+>>> class Status(Enum):
+...     ACTIVE = "active"
+...     DISABLED = "disabled"
+
+>>> converter = Converter()
+>>> use_open_enums(converter, Status)
+
+>>> converter.structure("active", Status)
+<Status.ACTIVE: 'active'>
+
+>>> unknown = converter.structure("archived", Status)
+>>> unknown
+UnknownEnumValue(Status, 'archived')
+>>> isinstance(unknown, Status)
+False
+
+>>> converter.unstructure(unknown)
+'archived'
+```
+
+Once the model gains the missing member, an unknown value can be explicitly reinterpreted by structuring it again.
+
+Enums not passed to the strategy keep the default strict behavior and reject unknown values.
+
+```{versionadded} 26.3.0
+
+```
