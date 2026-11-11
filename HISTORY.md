@@ -25,6 +25,8 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
   ([#787](https://github.com/python-attrs/cattrs/pull/787))
 - Python 3.15 is now supported and part of the test matrix.
   ([#787](https://github.com/python-attrs/cattrs/pull/787))
+- `Converter.copy` and `BaseConverter.copy` now carry over custom structure hooks registered for unions, including the hooks produced by the tagged union strategy, so a copied converter no longer falls back to default union disambiguation.
+- `Converter.copy` and `BaseConverter.copy` now preserve the custom `unstructure_fallback_factory` and `structure_fallback_factory` instead of resetting them to the defaults.
 - {meth}`BaseConverter.structure`, {meth}`BaseConverter.get_structure_hook` and the preconfigured converters' `loads` methods now use
   [PEP 747](https://peps.python.org/pep-0747/) [`TypeForm`](https://typing.python.org/en/latest/spec/type-forms.html#type-forms) annotations,
   allowing type checkers to infer result types for unions, literals, type aliases and other non-trivial types.

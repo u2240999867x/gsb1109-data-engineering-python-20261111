@@ -193,10 +193,12 @@ class BaseConverter:
         "_prefer_attrib_converters",
         "_struct_copy_skip",
         "_structure_attrs",
+        "_structure_fallback_factory",
         "_structure_func",
         "_union_struct_registry",
         "_unstruct_copy_skip",
         "_unstructure_attrs",
+        "_unstructure_fallback_factory",
         "_unstructure_func",
         "detailed_validation",
     )
@@ -231,6 +233,11 @@ class BaseConverter:
 
         self.detailed_validation = detailed_validation
         self._union_struct_registry: dict[Any, Callable[[Any, type[T]], T]] = {}
+
+        # Keep the fallback factories as per-instance state, so copies of the
+        # converter preserve them.
+        self._unstructure_fallback_factory = unstructure_fallback_factory
+        self._structure_fallback_factory = structure_fallback_factory
 
         # Create a per-instance cache.
         if unstruct_strat is UnstructureStrategy.AS_DICT:
@@ -1090,10 +1097,13 @@ class BaseConverter:
                 if detailed_validation is not None
                 else self.detailed_validation
             ),
+            self._unstructure_fallback_factory,
+            self._structure_fallback_factory,
         )
 
         self._unstructure_func.copy_to(res._unstructure_func, self._unstruct_copy_skip)
         self._structure_func.copy_to(res._structure_func, self._struct_copy_skip)
+        res._union_struct_registry.update(self._union_struct_registry)
 
         return res
 
@@ -1522,6 +1532,8 @@ class Converter(BaseConverter):
                 if detailed_validation is not None
                 else self.detailed_validation
             ),
+            unstructure_fallback_factory=self._unstructure_fallback_factory,
+            structure_fallback_factory=self._structure_fallback_factory,
             use_alias=(use_alias if use_alias is not None else self.use_alias),
         )
 
@@ -1529,6 +1541,7 @@ class Converter(BaseConverter):
             res._unstructure_func, skip=self._unstruct_copy_skip
         )
         self._structure_func.copy_to(res._structure_func, skip=self._struct_copy_skip)
+        res._union_struct_registry.update(self._union_struct_registry)
 
         return res
 
