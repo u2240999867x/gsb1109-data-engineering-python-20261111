@@ -10,7 +10,7 @@ from .errors import (
     IterableValidationNote,
     StructureHandlerNotFoundError,
 )
-from .gen import override
+from .gen import Extras, override
 from .types import SimpleStructureHook
 from .v import transform_error
 
@@ -20,6 +20,7 @@ __all__ = [
     "BaseValidationError",
     "ClassValidationError",
     "Converter",
+    "Extras",
     "ForbiddenExtraKeysError",
     "GenConverter",
     "IterableValidationError",

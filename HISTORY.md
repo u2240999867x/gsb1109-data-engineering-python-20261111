@@ -13,6 +13,10 @@ Our backwards-compatibility policy can be found [here](https://github.com/python
 
 ## NEXT
 
+- Add {class}`cattrs.Extras`, an explicit extra-field retention convention.
+  A class declaring ``__cattrs_extras__ = Extras(field="extra")`` collects unrecognized input keys into the named attribute when structuring and merges them back at the top level when unstructuring, so payloads from newer producers round-trip losslessly.
+  ``Extras(key="_extra")`` nests the retained mapping under a reserved dictionary key instead.
+  Classes without a declaration keep the existing extra-keys policy (`forbid_extra_keys` included), and the declaration can be overridden per hook with the new `_cattrs_extras` parameter of {func}`make_dict_structure_fn() <cattrs.gen.make_dict_structure_fn>` and {func}`make_dict_unstructure_fn() <cattrs.gen.make_dict_unstructure_fn>`.
 - Fix the msgspec converter passing typed deques directly to the encoder, which cannot serialize them. Deques are now unstructured into lists, including when nested in attrs classes or dataclasses.
   ([#818](https://github.com/python-attrs/cattrs/issues/818) [#819](https://github.com/python-attrs/cattrs/pull/819))
 

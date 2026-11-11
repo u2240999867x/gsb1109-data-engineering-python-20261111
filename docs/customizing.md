@@ -289,6 +289,69 @@ This behavior can only be applied to classes or to the default for the {class}`C
 The value for the `make_dict_structure_fn._cattrs_forbid_extra_keys` parameter is now taken from the given converter by default.
 ```
 
+### Retaining extra fields (`Extras`)
+
+```{versionadded} NEXT
+```
+
+Sometimes unknown keys should not be dropped nor rejected, but kept so they can be
+sent back later — for example when an older service re-serializes payloads produced
+by a newer one. A class can opt in to explicit extra-field retention by declaring an
+{class}`cattrs.Extras` convention as the `__cattrs_extras__` class attribute:
+
+```{doctest}
+
+>>> from typing import Any
+>>> from cattrs.gen import Extras
+
+>>> @define
+... class Record:
+...     name: str
+...     extra: dict[str, Any] = Factory(dict)
+...
+...     __cattrs_extras__ = Extras(field="extra")
+
+>>> c = cattrs.Converter()
+>>> record = c.structure({"name": "a", "legacy_flag": True}, Record)
+>>> record
+Record(name='a', extra={'legacy_flag': True})
+>>> c.unstructure(record)
+{'name': 'a', 'legacy_flag': True}
+```
+
+With `Extras(field="extra")`, input keys that do not correspond to a declared field
+are collected into a mapping stored on the `extra` attribute, and merged back into
+the output at the top level when unstructuring. The retention attribute itself is
+never emitted under its own name. The target attribute must have a default (or be
+`init=False`), since the retained mapping is written after instantiation.
+
+Alternatively, `Extras(key="_extra")` nests the retained mapping under a reserved
+dictionary key instead of spreading it at the top level. The class must declare an
+attribute of the same name, which is read from and written to the reserved key like
+a normal field; other unknown top-level keys still follow the converter's
+extra-keys policy.
+
+Classes without a declaration are unaffected: unknown keys are ignored, or rejected
+when `forbid_extra_keys` is enabled. For declared classes, retention takes
+precedence over `forbid_extra_keys`.
+
+**Conflict rules**
+
+* An input key colliding with the reserved name is treated as the retained mapping
+  itself (a seed); a non-mapping value there raises `TypeError`.
+* A retained key colliding with a key produced by a declared field — for example
+  because the field was renamed, or a removed field's old name was retained and
+  later reused — raises `ValueError` when unstructuring. Declared values always
+  win; conflicts are never silently overwritten.
+* Re-structuring replaces the retained mapping wholesale with the values of the
+  new input; it is never merged with previously retained values.
+* The retention attribute cannot carry a `rename` override; declaring one raises
+  `ValueError` when the hook is generated.
+
+The declaration can be overridden or disabled per hook with the
+`_cattrs_extras` parameter of {func}`make_dict_structure_fn() <cattrs.gen.make_dict_structure_fn>`
+and {func}`make_dict_unstructure_fn() <cattrs.gen.make_dict_unstructure_fn>`.
+
 ### `rename`
 
 Using the rename override makes `cattrs` use the provided name instead of the real attribute name.

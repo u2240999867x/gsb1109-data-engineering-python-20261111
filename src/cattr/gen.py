@@ -1,5 +1,6 @@
 from cattrs.cols import iterable_unstructure_factory as make_iterable_unstructure_fn
 from cattrs.gen import (
+    Extras,
     make_dict_structure_fn,
     make_dict_unstructure_fn,
     make_hetero_tuple_structure_fn,
@@ -12,6 +13,7 @@ from cattrs.gen._consts import AttributeOverride
 
 __all__ = [
     "AttributeOverride",
+    "Extras",
     "make_dict_structure_fn",
     "make_dict_unstructure_fn",
     "make_hetero_tuple_structure_fn",

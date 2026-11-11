@@ -32,6 +32,7 @@ from ._compat import (
     Sequence,
     Set,
     TypeAlias,
+    adapted_fields,
     fields,
     frozendict,
     get_final_base,
@@ -102,6 +103,13 @@ from .gen import (
     make_dict_unstructure_fn,
     make_hetero_tuple_structure_fn,
     make_hetero_tuple_unstructure_fn,
+)
+from .gen._shared import (
+    collect_field_extras,
+    collect_key_extras,
+    merge_extras,
+    resolve_extras,
+    set_retained_extras,
 )
 from .gen.typeddicts import make_dict_structure_fn as make_typeddict_dict_struct_fn
 from .gen.typeddicts import make_dict_unstructure_fn as make_typeddict_dict_unstruct_fn
@@ -667,11 +675,26 @@ class BaseConverter:
         """Our version of `attrs.asdict`, so we can call back to us."""
         attrs = fields(obj.__class__)
         dispatch = self._unstructure_func.dispatch
+        extras = getattr(obj.__class__, "__cattrs_extras__", None)
+        field_target = extras.field if extras is not None else None
         rv = self._dict_factory()
         for a in attrs:
             name = a.name
+            if name == field_target:
+                # Retained extra fields are merged back raw, below.
+                continue
             v = getattr(obj, name)
             rv[name] = dispatch(a.type or v.__class__)(v)
+        if field_target is not None:
+            retained = getattr(obj, field_target)
+            if retained is not None:
+                if not isinstance(retained, AbcMapping):
+                    raise TypeError(
+                        f"Retained extra fields attribute {field_target!r} of "
+                        f"{obj.__class__.__qualname__} must hold a mapping, got "
+                        f"{type(retained).__name__}."
+                    )
+                merge_extras(rv, retained, obj.__class__)
         return rv
 
     def unstructure_attrs_astuple(self, obj: Any) -> tuple[Any, ...]:
@@ -819,8 +842,18 @@ class BaseConverter:
         """Instantiate an attrs class from a mapping (dict)."""
         # For public use.
 
+        extras = None
+        if getattr(cl, "__cattrs_extras__", None) is not None:
+            extras = resolve_extras(cl, adapted_fields(cl))
+            if extras.key is not None:
+                # Validate the reserved key eagerly for a clear error.
+                collect_key_extras(obj, extras.key)
+
         conv_obj = {}  # Start with a fresh dict, to ignore extra keys.
         for a in fields(cl):
+            if extras is not None and a.name == extras.field:
+                # Filled in from the retained extra fields below.
+                continue
             try:
                 val = obj[a.name]
             except KeyError:
@@ -829,7 +862,12 @@ class BaseConverter:
             # try .alias and .name because this code also supports dataclasses!
             conv_obj[getattr(a, "alias", a.name)] = self._structure_attribute(a, val)
 
-        return cl(**conv_obj)
+        inst = cl(**conv_obj)
+        if extras is not None and extras.field is not None:
+            known = frozenset(a.name for a in fields(cl))
+            retained = collect_field_extras(obj, known, extras.field)
+            set_retained_extras(inst, extras.field, retained, cl)
+        return inst
 
     def _structure_deque(self, obj: Iterable[T], cl: Any) -> deque[T]:
         """Convert an iterable to a potentially generic deque."""

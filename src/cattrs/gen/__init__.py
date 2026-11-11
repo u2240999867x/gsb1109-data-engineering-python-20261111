@@ -30,15 +30,24 @@ from ..errors import (
 )
 from ..fns import identity
 from ..types import SimpleStructureHook
-from ._consts import AttributeOverride, already_generating, neutral
+from ._consts import AttributeOverride, Extras, already_generating, neutral
 from ._generics import generate_mapping
 from ._lc import generate_unique_filename
-from ._shared import _annotated_override_or_default, find_structure_handler
+from ._shared import (
+    _annotated_override_or_default,
+    collect_field_extras,
+    collect_key_extras,
+    find_structure_handler,
+    merge_extras,
+    resolve_extras,
+    set_retained_extras,
+)
 
 if TYPE_CHECKING:
     from ..converters import BaseConverter
 
 __all__ = [
+    "Extras",
     "make_dict_structure_fn",
     "make_dict_structure_fn_from_attrs",
     "make_dict_unstructure_fn",
@@ -68,6 +77,97 @@ def override(
 T = TypeVar("T")
 
 
+def _effective_known_keys(
+    attrs: list[Attribute],
+    overrides: Mapping[str, AttributeOverride],
+    include_init_false: bool,
+) -> frozenset[str]:
+    """Keys read or emitted by a generated hook for ``attrs``."""
+    known: set[str] = set()
+    for a in attrs:
+        override = overrides.get(a.name, neutral)
+        if override.omit:
+            continue
+        if override.omit is None and not a.init and not include_init_false:
+            continue
+        known.add(override.rename or a.name)
+    return frozenset(known)
+
+
+def _extras_structure_wrapper(
+    hook: Callable[..., T], cl: type[T], extras: Extras, known_keys: frozenset[str]
+) -> Callable[[Mapping[str, Any]], T]:
+    """Wrap a structure hook to retain unrecognized fields per ``extras``."""
+    target = extras.target
+    is_key_mode = extras.key is not None
+    reserved = extras.key or target
+
+    def structure_with_extras(o, _cl=None):
+        if not isinstance(o, Mapping):
+            return hook(o)
+        if is_key_mode:
+            # The reserved key is a declared field; validate it and let the
+            # base hook handle it normally. Other unknown top-level keys still
+            # follow the base hook's extra-keys policy.
+            collect_key_extras(o, reserved)
+            return hook(o)
+        retained = collect_field_extras(o, known_keys, reserved)
+        # Unknown keys are retained, so they must not reach the base hook,
+        # in particular when it forbids extra keys.
+        payload = {k: v for k, v in o.items() if k in known_keys and k != reserved}
+        instance = hook(payload)
+        set_retained_extras(instance, target, retained, cl)
+        return instance
+
+    structure_with_extras.overrides = getattr(hook, "overrides", {})
+    return structure_with_extras
+
+
+def _extras_unstructure_wrapper(
+    hook: Callable[[T], dict[str, Any]], cl: type[T], extras: Extras
+) -> Callable[[T], dict[str, Any]]:
+    """Wrap an unstructure hook to restore retained fields at the top level."""
+    target = extras.target
+    is_key_mode = extras.key is not None
+    reserved = extras.key or target
+
+    def unstructure_with_extras(instance):
+        retained = getattr(instance, target)
+        if retained is not None and not isinstance(retained, Mapping):
+            raise TypeError(
+                f"Retained extra fields attribute {target!r} of "
+                f"{cl.__qualname__} must hold a mapping, got "
+                f"{type(retained).__name__}."
+            )
+        res = hook(instance)
+        if retained is None:
+            return res
+        if is_key_mode:
+            if retained:
+                res[reserved] = dict(retained)
+            return res
+        # In field mode the target attribute is suppressed from the output, so
+        # merge its contents back at the original level.
+        res.pop(reserved, None)
+        return merge_extras(res, retained, cl)
+
+    unstructure_with_extras.overrides = getattr(hook, "overrides", {})
+    return unstructure_with_extras
+
+
+def _validate_extras(
+    extras: Extras, overrides: Mapping[str, AttributeOverride]
+) -> None:
+    """Fail fast on declarations incompatible with the field overrides."""
+    target = extras.target
+    target_override = overrides.get(target, neutral)
+    if target_override.rename is not None:
+        raise ValueError(
+            f"The Extras target attribute {target!r} cannot be renamed; remove "
+            f"the rename override to use it for retaining extra fields."
+        )
+
+
 def make_dict_unstructure_fn_from_attrs(
     attrs: list[Attribute],
     cl: type[T],
@@ -77,6 +177,7 @@ def make_dict_unstructure_fn_from_attrs(
     _cattrs_use_linecache: bool = True,
     _cattrs_use_alias: bool | Literal["from_converter"] = "from_converter",
     _cattrs_include_init_false: bool = False,
+    _cattrs_extras: Extras | None | Literal["from_class"] = "from_class",
     **kwargs: AttributeOverride,
 ) -> Callable[[T], dict[str, Any]]:
     """
@@ -96,6 +197,10 @@ def make_dict_unstructure_fn_from_attrs(
         dictionary key by default.
     :param _cattrs_include_init_false: If true, _attrs_ fields marked as `init=False`
         will be included.
+    :param _cattrs_extras: An `Extras` declaration naming the attribute holding
+        retained unrecognized fields. By default the declaration is resolved from
+        the class' `__cattrs_extras__` attribute; pass `None` to ignore a
+        class-level declaration.
 
     .. versionadded:: 24.1.0
     .. versionchanged:: 25.2.0
@@ -108,6 +213,8 @@ def make_dict_unstructure_fn_from_attrs(
         When `_cattrs_omit_if_default` is true and the attribute has an attrs converter
         specified, the converter is applied to the default value before checking if it
         is equal to the attribute's value.
+    .. versionadded:: NEXT
+        The `_cattrs_extras` parameter and the `Extras` retention convention.
     """
 
     fn_name = "unstructure_" + cl.__name__
@@ -253,6 +360,12 @@ def make_dict_unstructure_fn_from_attrs(
     res = globs[fn_name]
     res.overrides = kwargs
 
+    if _cattrs_extras == "from_class":
+        _cattrs_extras = resolve_extras(cl, attrs)
+    if _cattrs_extras is not None:
+        _validate_extras(_cattrs_extras, kwargs)
+        res = _extras_unstructure_wrapper(res, cl, _cattrs_extras)
+
     return res
 
 
@@ -263,6 +376,7 @@ def make_dict_unstructure_fn(
     _cattrs_use_linecache: bool = True,
     _cattrs_use_alias: bool | Literal["from_converter"] = "from_converter",
     _cattrs_include_init_false: bool = False,
+    _cattrs_extras: Extras | None | Literal["from_class"] = "from_class",
     **kwargs: AttributeOverride,
 ) -> Callable[[T], dict[str, Any]]:
     """
@@ -279,6 +393,10 @@ def make_dict_unstructure_fn(
         dictionary key by default.
     :param _cattrs_include_init_false: If true, _attrs_ fields marked as `init=False`
         will be included.
+    :param _cattrs_extras: An `Extras` declaration naming the attribute holding
+        retained unrecognized fields. By default the declaration is resolved from
+        the class' `__cattrs_extras__` attribute; pass `None` to ignore a
+        class-level declaration.
 
     .. versionadded:: 23.2.0 *_cattrs_use_alias*
     .. versionadded:: 23.2.0 *_cattrs_include_init_false*
@@ -288,6 +406,8 @@ def make_dict_unstructure_fn(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionadded:: NEXT
+        The `_cattrs_extras` parameter and the `Extras` retention convention.
     """
     origin = get_origin(cl)
     attrs = adapted_fields(origin or cl)  # type: ignore
@@ -324,6 +444,7 @@ def make_dict_unstructure_fn(
             _cattrs_use_linecache=_cattrs_use_linecache,
             _cattrs_use_alias=_cattrs_use_alias,
             _cattrs_include_init_false=_cattrs_include_init_false,
+            _cattrs_extras=_cattrs_extras,
             **kwargs,
         )
     finally:
@@ -345,6 +466,7 @@ def make_dict_structure_fn_from_attrs(
     _cattrs_detailed_validation: bool | Literal["from_converter"] = "from_converter",
     _cattrs_use_alias: bool | Literal["from_converter"] = "from_converter",
     _cattrs_include_init_false: bool = False,
+    _cattrs_extras: Extras | None | Literal["from_class"] = "from_class",
     **kwargs: AttributeOverride,
 ) -> SimpleStructureHook[Mapping[str, Any], T]:
     """
@@ -367,6 +489,10 @@ def make_dict_structure_fn_from_attrs(
         dictionary key by default.
     :param _cattrs_include_init_false: If true, _attrs_ fields marked as `init=False`
         will be included.
+    :param _cattrs_extras: An `Extras` declaration naming the attribute retaining
+        unrecognized fields. By default the declaration is resolved from the
+        class' `__cattrs_extras__` attribute; pass `None` to ignore a class-level
+        declaration and fall back to the converter extra-keys policy.
 
     .. versionadded:: 24.1.0
     .. versionchanged:: 25.2.0
@@ -375,6 +501,8 @@ def make_dict_structure_fn_from_attrs(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionadded:: NEXT
+        The `_cattrs_extras` parameter and the `Extras` retention convention.
     """
 
     cl_name = cl.__name__
@@ -755,6 +883,13 @@ def make_dict_structure_fn_from_attrs(
     res = globs[fn_name]
     res.overrides = kwargs
 
+    if _cattrs_extras == "from_class":
+        _cattrs_extras = resolve_extras(cl, attrs)
+    if _cattrs_extras is not None:
+        _validate_extras(_cattrs_extras, kwargs)
+        known_keys = _effective_known_keys(attrs, kwargs, _cattrs_include_init_false)
+        res = _extras_structure_wrapper(res, cl, _cattrs_extras, known_keys)
+
     return res
 
 
@@ -769,6 +904,7 @@ def make_dict_structure_fn(
     _cattrs_detailed_validation: bool | Literal["from_converter"] = "from_converter",
     _cattrs_use_alias: bool | Literal["from_converter"] = "from_converter",
     _cattrs_include_init_false: bool = False,
+    _cattrs_extras: Extras | None | Literal["from_class"] = "from_class",
     **kwargs: AttributeOverride,
 ) -> SimpleStructureHook[Mapping[str, Any], T]:
     """
@@ -790,6 +926,10 @@ def make_dict_structure_fn(
         dictionary key by default.
     :param _cattrs_include_init_false: If true, _attrs_ fields marked as `init=False`
         will be included.
+    :param _cattrs_extras: An `Extras` declaration naming the attribute retaining
+        unrecognized fields. By default the declaration is resolved from the
+        class' `__cattrs_extras__` attribute; pass `None` to ignore a class-level
+        declaration and fall back to the converter extra-keys policy.
 
     .. versionadded:: 23.2.0 *_cattrs_use_alias*
     .. versionadded:: 23.2.0 *_cattrs_include_init_false*
@@ -805,6 +945,8 @@ def make_dict_structure_fn(
     .. versionchanged:: 26.1.0
         `typing.Annotated[T, override()]` is now recognized and can be used to customize
         unstructuring.
+    .. versionadded:: NEXT
+        The `_cattrs_extras` parameter and the `Extras` retention convention.
     """
 
     mapping = {}
@@ -846,6 +988,7 @@ def make_dict_structure_fn(
             _cattrs_detailed_validation=_cattrs_detailed_validation,
             _cattrs_use_alias=_cattrs_use_alias,
             _cattrs_include_init_false=_cattrs_include_init_false,
+            _cattrs_extras=_cattrs_extras,
             **kwargs,
         )
     finally:
