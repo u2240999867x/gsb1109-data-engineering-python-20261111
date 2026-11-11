@@ -3,6 +3,7 @@
 
 ### Latest
 
+* FEATURE : try_update - validate several updates against the current schema as a single modification and only apply them if the combined result is valid, leaving the YAML object untouched on failure.
 * BUGFIX : Fully parse URL, fix #141
 
 

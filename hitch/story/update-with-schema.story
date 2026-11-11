@@ -90,3 +90,52 @@ Updating document with a schema:
           doc['b'] = '9'
           assert doc['b'] == 9
 
+
+    Try update applies several valid changes as one modification:
+      steps:
+      - Run: |-
+          doc = s.load('# comment\nthreshold: 5\nname: old\n', s.Map({
+            'threshold': s.Int(),
+            s.Optional('name'): s.Str(),
+          }))
+          doc.try_update({'threshold': '42', 'name': 'new'})
+          assert doc['threshold'].data == 42
+          assert type(doc['threshold'].data) is int
+          assert doc['threshold'].text == '42'
+          assert doc['name'].data == 'new'
+          assert '# comment' in doc.as_yaml()
+
+    Try update with invalid change leaves document untouched and editable:
+      steps:
+      - Run: |-
+          doc = s.load('# comment\nthreshold: 5\n', s.Map({
+            'threshold': s.Int(),
+            s.Optional('name'): s.Str(),
+          }))
+          before = doc.as_yaml()
+          try:
+            doc.try_update({'threshold': 'not-an-int', 'name': 'x'})
+            raise AssertionError('should have raised')
+          except s.exceptions.YAMLSerializationError:
+            pass
+          assert doc.as_yaml() == before
+          assert doc['threshold'].data == 5
+          assert doc['threshold'].text == '5'
+          assert 'name' not in doc.data
+          doc['threshold'] = 7
+          assert doc['threshold'].data == 7
+
+    Try update is atomic when one of several changes is invalid:
+      steps:
+      - Run: |-
+          doc = s.load('threshold: 5\nname: old\n', s.Map({
+            'threshold': s.Int(),
+            'name': s.Str(),
+          }))
+          try:
+            doc.try_update({'threshold': '99', 'name': 5})
+            raise AssertionError('should have raised')
+          except s.exceptions.YAMLSerializationError:
+            pass
+          assert doc.data == {'threshold': 5, 'name': 'old'}, doc.data
+          assert doc.as_yaml() == 'threshold: 5\nname: old\n', doc.as_yaml()

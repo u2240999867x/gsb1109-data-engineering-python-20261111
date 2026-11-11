@@ -145,6 +145,18 @@ class YAMLChunk(object):
         Used when modifying a YAML chunk so that the modification can be validated
         before changing it.
         """
+        return self.fork_all([(strictindex, new_value)])
+
+    def fork_all(self, updates):
+        """
+        Return a chunk referring to the same location in a duplicated document,
+        with several values replaced in one go.
+
+        Used when modifying several values in a YAML chunk so that the combined
+        modification can be validated before changing anything.
+
+        'updates' is an iterable of (strictindex, new_value) pairs.
+        """
         forked_chunk = YAMLChunk(
             deepcopy(self._ruamelparsed),
             pointer=self.pointer,
@@ -157,8 +169,13 @@ class YAMLChunk(object):
             forked_chunk.pointer.set(
                 forked_chunk, "_strictparsed", CommentedMap(), strictdoc=True
             )
-        forked_chunk.contents[self.ruamelindex(strictindex)] = new_value.as_marked_up()
-        forked_chunk.strictparsed()[strictindex] = deepcopy(new_value.as_marked_up())
+        for strictindex, new_value in updates:
+            forked_chunk.contents[self.ruamelindex(strictindex)] = (
+                new_value.as_marked_up()
+            )
+            forked_chunk.strictparsed()[strictindex] = deepcopy(
+                new_value.as_marked_up()
+            )
         return forked_chunk
 
     def add_key_association(self, unprocessed_key, processed_key):

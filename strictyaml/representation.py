@@ -237,6 +237,14 @@ class YAML(object):
             new_value = self._validator(forked_chunk)
 
         # Now, overwrite our chunk and value with the new information.
+        self._commit(new_value)
+
+    def _commit(self, new_value):
+        """
+        Overwrite our chunk and value with newly validated information,
+        updating any parent pointers so the change is reflected in the
+        whole document.
+        """
         old_chunk = self._chunk  # Needed for reference to pre-fork ruamel
         self._chunk = new_value._chunk
         self._value = new_value._value
@@ -250,6 +258,63 @@ class YAML(object):
         # pointing at the original document.
         self._chunk._ruamelparsed = old_chunk._ruamelparsed
         self._chunk._strictparsed = old_chunk._strictparsed
+
+    def try_update(self, updates):
+        """
+        Update several keys/indices as a single modification, validating the
+        combined result against the current schema *before* changing anything.
+
+        'updates' is a mapping of key/index -> new value (raw Python values
+        or YAML objects).
+
+        If the combined update does not validate, an exception is raised and
+        this YAML object is left completely untouched - comments, original
+        text and all values are preserved and the object can still be edited.
+
+        If it does validate, all of the updates are committed in one go and
+        the resulting values and types correspond to the new text.
+        """
+        # Copy our whole node's data and apply every update to the copy so
+        # that the combined result can be validated against the schema before
+        # anything is changed. Must replace whole current node to support
+        # complex types, e.g. ``EmptyList() | Seq(Str())``.
+        candidate = self.data
+        if not isinstance(candidate, (dict, list)):
+            raise TypeError(
+                "{0} is a scalar value, cannot update items.".format(repr(self))
+            )
+        strictindices = []
+        for index, value in updates.items():
+            strictindex = self._strictindex(index)
+            if isinstance(candidate, list) and len(candidate) <= index:
+                raise YAMLSerializationError(
+                    "cannot extend list via try_update.  "
+                    "Instead, replace whole list on parent "
+                    "node."
+                )
+            candidate[index] = value.data if isinstance(value, YAML) else value
+            strictindices.append(strictindex)
+
+        # Validate the combined result - raises here if invalid, while the
+        # YAML object is still completely untouched.
+        try:
+            yaml_value = YAMLChunk(self._validator.to_yaml(candidate))
+        except KeyError as key_error:
+            raise YAMLSerializationError(
+                "unexpected key not in schema '{0}'".format(key_error.args[0])
+            )
+        yaml_value_repr = self._validator(yaml_value)
+
+        # Now that the new content is properly validated, create a valid
+        # chunk with all of the new information and commit it in one go.
+        forked_chunk = self._chunk.fork_all(
+            [
+                (strictindex, yaml_value_repr[strictindex])
+                for strictindex in strictindices
+            ]
+        )
+        new_value = self._validator(forked_chunk)
+        self._commit(new_value)
 
     def __delitem__(self, index):
         strictindex = self._strictindex(index)
