@@ -120,3 +120,15 @@ class EmptyExpressionError(JMESPathError):
 
 class UnknownFunctionError(JMESPathError):
     pass
+
+
+@with_str_method
+class UndefinedParameterError(JMESPathError):
+    """Raised when an expression references a parameter with no bound value."""
+
+    def __init__(self, parameter_name):
+        self.parameter_name = parameter_name
+        super(UndefinedParameterError, self).__init__(
+            "Attempted to reference undefined parameter '$%s'. "
+            "A value for this parameter must be provided via the "
+            "params argument of search()." % parameter_name)

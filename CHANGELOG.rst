@@ -1,7 +1,10 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add support for bound parameters (``$name``) in expressions. Values
+  are passed via the ``params`` argument of ``search`` instead of being
+  interpolated into the expression string, and are resolved per call so
+  a compiled expression can be reused concurrently across threads.
 
 
 1.1.0

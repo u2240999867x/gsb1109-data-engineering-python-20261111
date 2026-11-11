@@ -79,6 +79,39 @@ This is useful if you're going to use the same jmespath expression to
 search multiple documents.  This avoids having to reparse the
 JMESPath expression each time you search a new document.
 
+Bound Parameters
+~~~~~~~~~~~~~~~~
+
+When the same expression only differs by a threshold or a region,
+prefer bound parameters over building the expression string with
+interpolated values.  A parameter is written as ``$`` followed by an
+identifier (for example ``$threshold``) and its value is supplied with
+the ``params`` argument of ``search``:
+
+.. code:: python
+
+    >>> import jmespath
+    >>> expression = jmespath.compile(
+    ...     'items[?score > $threshold && region == $region].name')
+    >>> data = {'items': [
+    ...     {'name': 'a', 'region': 'cn', 'score': 10},
+    ...     {'name': 'b', 'region': 'us', 'score': 25},
+    ...     {'name': 'c', 'region': 'cn', 'score': 40}]}
+    >>> expression.search(data, params={'threshold': 20, 'region': 'cn'})
+    ['c']
+    >>> expression.search(data, params={'threshold': 30, 'region': 'us'})
+    []
+
+Parameter values are plain Python data and are never parsed as part of
+the expression, so quotes inside a value cannot change the query
+structure.  A parameter always resolves to the value bound for the
+current ``search`` call, including while evaluating the condition of a
+projection; it does not switch to the projected element.  Referencing a
+parameter that was not provided raises
+``jmespath.exceptions.UndefinedParameterError``.  The binding is created
+per call and is read only, so the same compiled expression can be shared
+between threads without parameters leaking across calls.
+
 Options
 -------
 

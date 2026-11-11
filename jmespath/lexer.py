@@ -60,6 +60,8 @@ class Lexer(object):
                 yield self._match_or_else('|', 'or', 'pipe')
             elif self._current == '&':
                 yield self._match_or_else('&', 'and', 'expref')
+            elif self._current == '$':
+                yield self._consume_parameter()
             elif self._current == '`':
                 yield self._consume_literal()
             elif self._current in self.VALID_NUMBER:
@@ -116,6 +118,25 @@ class Lexer(object):
         while self._next() in self.VALID_NUMBER:
             buff += self._current
         return buff
+
+    def _consume_parameter(self):
+        # A parameter reference is '$' followed by an identifier,
+        # e.g. '$threshold'.  The parameter name is resolved at
+        # evaluation time from the values passed to search(), so it
+        # is never interpreted as part of the query structure.
+        start = self._position
+        next_char = self._next()
+        if next_char not in self.START_IDENTIFIER:
+            raise LexerError(
+                lexer_position=start,
+                lexer_value=self._expression[start:],
+                message="Parameter name must start with a letter or "
+                        "underscore and follow the '$' character")
+        buff = next_char
+        while self._next() in self.VALID_IDENTIFIER:
+            buff += self._current
+        return {'type': 'parameter', 'value': buff,
+                'start': start, 'end': start + len(buff) + 1}
 
     def _initialize_for_expression(self, expression):
         if not expression:

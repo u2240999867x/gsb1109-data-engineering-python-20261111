@@ -45,6 +45,7 @@ class Parser(object):
         'number': 0,
         'current': 0,
         'expref': 0,
+        'parameter': 0,
         'colon': 0,
         'pipe': 1,
         'or': 2,
@@ -249,6 +250,9 @@ class Parser(object):
 
     def _token_nud_current(self, token):
         return ast.current_node()
+
+    def _token_nud_parameter(self, token):
+        return ast.parameter(token['value'])
 
     def _token_nud_expref(self, token):
         expression = self._expression(self.BINDING_POWER['expref'])
@@ -511,8 +515,11 @@ class ParsedResult(object):
         self.expression = expression
         self.parsed = parsed
 
-    def search(self, value, options=None):
-        interpreter = visitor.TreeInterpreter(options)
+    def search(self, value, options=None, params=None):
+        # A fresh interpreter (and therefore a fresh parameter binding)
+        # is created for every search, so a shared ParsedResult can be
+        # used concurrently without params leaking between calls.
+        interpreter = visitor.TreeInterpreter(options, params=params)
         result = interpreter.visit(self.parsed, value)
         return result
 

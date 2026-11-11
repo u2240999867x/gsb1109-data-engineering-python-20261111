@@ -1,5 +1,7 @@
 import operator
+from types import MappingProxyType
 
+from jmespath import exceptions
 from jmespath import functions
 from jmespath.compat import string_type
 from numbers import Number
@@ -109,7 +111,7 @@ class TreeInterpreter(Visitor):
     _EQUALITY_OPS = ['eq', 'ne']
     MAP_TYPE = dict
 
-    def __init__(self, options=None):
+    def __init__(self, options=None, params=None):
         super(TreeInterpreter, self).__init__()
         self._dict_cls = self.MAP_TYPE
         if options is None:
@@ -121,6 +123,10 @@ class TreeInterpreter(Visitor):
             self._functions = self._options.custom_functions
         else:
             self._functions = functions.Functions()
+        # The parameter binding is per search() call and read only.
+        # It is never stored on the compiled expression, so concurrent
+        # searches with the same ParsedResult cannot leak params.
+        self._params = MappingProxyType(dict(params) if params else {})
 
     def default_visit(self, node, *args, **kwargs):
         raise NotImplementedError(node['type'])
@@ -226,6 +232,16 @@ class TreeInterpreter(Visitor):
 
     def visit_literal(self, node, value):
         return node['value']
+
+    def visit_parameter(self, node, value):
+        # A parameter always resolves against the values bound for the
+        # current search() call, regardless of the node currently being
+        # visited (including elements inside projections).
+        name = node['value']
+        try:
+            return self._params[name]
+        except KeyError:
+            raise exceptions.UndefinedParameterError(name)
 
     def visit_multi_select_dict(self, node, value):
         if value is None:

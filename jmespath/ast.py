@@ -54,6 +54,10 @@ def multi_select_dict(nodes):
     return {"type": "multi_select_dict", "children": nodes}
 
 
+def parameter(name):
+    return {'type': 'parameter', 'children': [], 'value': name}
+
+
 def multi_select_list(nodes):
     return {"type": "multi_select_list", "children": nodes}
 
