@@ -1,10 +1,10 @@
 import os.path
 import pathlib
 
-
+import pytest
 
 from boltons import fileutils
-from boltons.fileutils import FilePerms, iter_find_files
+from boltons.fileutils import FilePerms, FindResult, iter_find_files
 from boltons.strutils import removeprefix
 
 
@@ -120,6 +120,110 @@ def test_iter_find_files_trailing_sep(tmp_path):
 
     assert _names(str(tmp_path)) == ['a.txt', 'b.txt']
     assert _names(str(tmp_path) + os.path.sep) == ['a.txt', 'b.txt']
+
+
+def _make_linked_tree(tmp_path):
+    """Builds a tree with internal, external, looping, and broken links."""
+    root = tmp_path / 'root'
+    real = root / 'real'
+    (real / 'sub').mkdir(parents=True)
+    (real / 'a.txt').write_text('a')
+    (real / 'sub' / 'b.txt').write_text('b')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'c.txt').write_text('c')
+    (root / 'top.txt').write_text('top')
+    os.symlink(str(real), str(root / 'link_real'))
+    os.symlink(str(real), str(root / 'link_real2'))
+    os.symlink(str(outside), str(root / 'link_outside'))
+    os.symlink(str(root), str(root / 'link_loop'))
+    os.symlink(str(root / 'missing'), str(root / 'link_broken'))
+    os.symlink(str(real / 'a.txt'), str(root / 'file_link.txt'))
+    return root
+
+
+def test_iter_find_files_follow_links_never(tmp_path):
+    root = _make_linked_tree(tmp_path)
+    found = list(iter_find_files(str(root), '*.txt'))
+    assert all(isinstance(p, str) for p in found)
+    assert sorted(os.path.basename(p) for p in found) == ['a.txt', 'b.txt', 'file_link.txt', 'top.txt']
+
+
+def test_iter_find_files_follow_links_within(tmp_path):
+    root = _make_linked_tree(tmp_path)
+    results = list(iter_find_files(str(root), '*.txt', follow_links='within'))
+    assert all(isinstance(r, FindResult) for r in results)
+
+    issues = {os.path.basename(r.path): r.issue for r in results if r.issue}
+    assert issues == {'link_loop': 'loop', 'link_broken': 'broken'}
+
+    matched = [r for r in results if not r.issue]
+    names = sorted(os.path.basename(r.path) for r in matched)
+    # dedupe_links defaults to True: link_real2's contents are not repeated
+    assert names == ['a.txt', 'b.txt', 'file_link.txt', 'top.txt']
+
+    by_name = {os.path.basename(r.path): r for r in matched}
+    # discovered path and resolved target are both reported
+    file_link = by_name['file_link.txt']
+    assert file_link.target == os.path.realpath(str(by_name['a.txt'].path))
+    assert by_name['top.txt'].target == os.path.realpath(by_name['top.txt'].path)
+    # the external link is not followed
+    assert 'c.txt' not in names
+
+
+def test_iter_find_files_follow_links_no_dedupe(tmp_path):
+    root = _make_linked_tree(tmp_path)
+    results = list(iter_find_files(str(root), '*.txt',
+                                   follow_links=True, dedupe_links=False))
+    names = sorted(os.path.basename(r.path) for r in results if not r.issue)
+    assert names == (['a.txt'] * 3 + ['b.txt'] * 3 + ['file_link.txt', 'top.txt'])
+
+
+def test_iter_find_files_follow_links_include_dirs(tmp_path):
+    root = _make_linked_tree(tmp_path)
+    results = list(iter_find_files(str(root), 'sub', include_dirs=True,
+                                   follow_links=True))
+    matched = [r for r in results if not r.issue]
+    assert len(matched) == 1
+    assert os.path.basename(matched[0].path) == 'sub'
+    assert matched[0].target == os.path.realpath(str(root / 'real' / 'sub'))
+
+
+def test_iter_find_files_follow_links_max_depth(tmp_path):
+    root = _make_linked_tree(tmp_path)
+    results = list(iter_find_files(str(root), '*.txt',
+                                   follow_links=True, max_depth=1))
+    names = sorted(os.path.basename(r.path) for r in results if not r.issue)
+    assert names == ['a.txt', 'file_link.txt', 'top.txt']
+
+
+def test_iter_find_files_follow_links_invalid(tmp_path):
+    with pytest.raises(ValueError):
+        list(iter_find_files(str(tmp_path), '*.txt', follow_links='always'))
+
+
+def test_iter_find_files_replaced_dir(tmp_path, monkeypatch):
+    root = tmp_path / 'root'
+    sub = root / 'sub'
+    sub.mkdir(parents=True)
+    (sub / 'a.txt').write_text('a')
+
+    real_scandir = os.scandir
+    swapped = []
+
+    # replace the directory with a file after it has been listed
+    def replacing_scandir(path):
+        entries = list(real_scandir(path))
+        if os.fspath(path) == str(root) and not swapped:
+            swapped.append(True)
+            (sub / 'a.txt').unlink()
+            sub.rmdir()
+            sub.write_text('not a dir')
+        return iter(entries)
+
+    monkeypatch.setattr(fileutils.os, 'scandir', replacing_scandir)
+    results = list(iter_find_files(str(root), '*.txt', follow_links=True))
+    assert [(os.path.basename(r.path), r.issue) for r in results] == [('sub', 'replaced')]
 
 
 def test_rotate_file_no_rotation(tmp_path):

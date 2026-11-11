@@ -14,6 +14,8 @@ close a few remaining gaps.
 
 .. autofunction:: boltons.fileutils.iter_find_files
 
+.. autoclass:: boltons.fileutils.FindResult
+
 .. autofunction:: boltons.fileutils.copytree
 
 .. autofunction:: boltons.fileutils.rotate_file

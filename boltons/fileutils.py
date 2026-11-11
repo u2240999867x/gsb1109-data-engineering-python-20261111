@@ -41,10 +41,11 @@ import stat
 import errno
 import fnmatch
 from shutil import copy2, copystat, Error
+from collections import namedtuple
 
 
 __all__ = ['mkdir_p', 'atomic_save', 'AtomicSaver', 'FilePerms',
-           'iter_find_files', 'copytree']
+           'iter_find_files', 'FindResult', 'copytree']
 
 
 FULL_PERMS = 0o777
@@ -489,7 +490,39 @@ class AtomicSaver:
         return
 
 
-def iter_find_files(directory, patterns, ignored=None, include_dirs=False, max_depth=None):
+class FindResult(namedtuple('FindResult', ['path', 'target', 'issue'])):
+    """The result type yielded by :func:`iter_find_files` when
+    *follow_links* is enabled.
+
+    Attributes:
+        path (str): The path where the entry was discovered, including
+            the search directory as a prefix.
+        target (str): The real, fully-resolved path of the entry. Equal
+            to *path* for entries not reached through symbolic links.
+            For broken links, the path the link points (or pointed) at.
+        issue (str or None): ``None`` for normal matches. Otherwise one
+            of ``'loop'`` (a link resolving to a directory already on
+            the traversal path), ``'broken'`` (a link whose target does
+            not exist), or ``'replaced'`` (a directory that was
+            deleted, or replaced by a non-directory or a link, between
+            being discovered and being traversed).
+    """
+    __slots__ = ()
+
+    def __new__(cls, path, target=None, issue=None):
+        if target is None:
+            target = path
+        return super().__new__(cls, path, target, issue)
+
+
+def _is_within(path, root):
+    "Check that real path *path* is equal to or under real path *root*."
+    path, root = os.path.normcase(path), os.path.normcase(root)
+    return path == root or path.startswith(root + os.path.sep)
+
+
+def iter_find_files(directory, patterns, ignored=None, include_dirs=False,
+                    max_depth=None, follow_links=False, dedupe_links=True):
     """Returns a generator that yields file paths under a *directory*,
     matching *patterns* using `glob`_ syntax (e.g., ``*.txt``). Also
     supports *ignored* patterns.
@@ -504,8 +537,26 @@ def iter_find_files(directory, patterns, ignored=None, include_dirs=False, max_d
         include_dirs (bool): Whether to include directories that match
            patterns, as well. Defaults to ``False``.
         max_depth (int): traverse up to this level of subdirectory.
-           I.e., 0 for the specified *directory* only, 1 for *directory* 
+           I.e., 0 for the specified *directory* only, 1 for *directory*
            and one level of subdirectory.
+        follow_links (bool or str): Symbolic link traversal policy.
+           ``False`` or ``'never'`` (the default) does not follow
+           links, preserving the historical behavior. ``True`` or
+           ``'within'`` follows links to directories, but only those
+           resolving to a location inside the root *directory*.
+        dedupe_links (bool): Only used when *follow_links* is
+           enabled. When ``True`` (the default), a directory reachable
+           through multiple links is only listed once, at its first
+           discovery. When ``False``, its contents are listed again
+           under every link that reaches it.
+
+    When *follow_links* is enabled, the generator yields
+    :class:`FindResult` objects instead of plain path strings, so that
+    both the discovered path and the actual target are available for
+    provenance reporting. Link loops, broken links, and directories
+    replaced during traversal are also yielded as ``FindResult``
+    objects with the respective *issue* set, regardless of whether
+    they match *patterns*; they are never silently skipped.
 
     For example, finding Python files in the current directory:
 
@@ -531,26 +582,103 @@ def iter_find_files(directory, patterns, ignored=None, include_dirs=False, max_d
         ignored = [ignored]
     ign_re = re.compile('|'.join([fnmatch.translate(p) for p in ignored]))
     directory = os.fspath(directory)
-    for root, dirs, files in os.walk(directory):
-        if max_depth is not None:
-            rel_root = os.path.relpath(root, directory)
-            depth = 0 if rel_root == os.curdir else rel_root.count(os.path.sep) + 1
-            if depth > max_depth:
-                continue
-        if include_dirs:
-            for basename in dirs:
+
+    if follow_links in (None, False, 'never'):
+        for root, dirs, files in os.walk(directory):
+            if max_depth is not None:
+                rel_root = os.path.relpath(root, directory)
+                depth = 0 if rel_root == os.curdir else rel_root.count(os.path.sep) + 1
+                if depth > max_depth:
+                    continue
+            if include_dirs:
+                for basename in dirs:
+                    if pats_re.match(basename):
+                        if ignored and ign_re.match(basename):
+                            continue
+                        filename = os.path.join(root, basename)
+                        yield filename
+
+            for basename in files:
                 if pats_re.match(basename):
                     if ignored and ign_re.match(basename):
                         continue
                     filename = os.path.join(root, basename)
                     yield filename
+        return
 
-        for basename in files:
-            if pats_re.match(basename):
-                if ignored and ign_re.match(basename):
+    if follow_links not in (True, 'within'):
+        raise ValueError('follow_links must be one of False, "never", '
+                         'True, or "within", got: %r' % (follow_links,))
+
+    root_real = os.path.realpath(directory)
+    visited = {os.path.normcase(root_real)}
+
+    def _match(basename):
+        if not pats_re.match(basename):
+            return False
+        return not (ignored and ign_re.match(basename))
+
+    def _scan(dir_path, dir_real, depth, ancestors, replaced_issue):
+        if max_depth is not None and depth > max_depth:
+            return
+        try:
+            entries = list(os.scandir(dir_path))
+        except (FileNotFoundError, NotADirectoryError):
+            # a discovered directory deleted or replaced by a
+            # non-directory before it could be traversed
+            if replaced_issue is not None:
+                yield FindResult(dir_path, dir_real, replaced_issue)
+            return
+        for entry in entries:
+            path = os.path.join(dir_path, entry.name)
+            if entry.is_symlink():
+                target = os.path.realpath(path)
+                try:
+                    st = os.stat(path)
+                except FileNotFoundError:
+                    yield FindResult(path, target, 'broken')
                     continue
-                filename = os.path.join(root, basename)
-                yield filename
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        yield FindResult(path, target, 'loop')
+                        continue
+                    raise
+                if not stat.S_ISDIR(st.st_mode):
+                    if _match(entry.name):
+                        yield FindResult(path, target)
+                    continue
+                if not _is_within(target, root_real):
+                    # links escaping the root directory are not followed
+                    continue
+                target_key = os.path.normcase(target)
+                if target_key in ancestors:
+                    yield FindResult(path, target, 'loop')
+                    continue
+                if dedupe_links and target_key in visited:
+                    continue
+                visited.add(target_key)
+                if include_dirs and _match(entry.name):
+                    yield FindResult(path, target)
+                yield from _scan(path, target, depth + 1,
+                                 ancestors | {target_key}, 'broken')
+            elif entry.is_dir(follow_symlinks=False):
+                if os.path.islink(path):
+                    # swapped for a link between listing and traversal
+                    yield FindResult(path, os.path.realpath(path), 'replaced')
+                    continue
+                real = os.path.realpath(path)
+                real_key = os.path.normcase(real)
+                visited.add(real_key)
+                if include_dirs and _match(entry.name):
+                    yield FindResult(path, real)
+                yield from _scan(path, real, depth + 1,
+                                 ancestors | {real_key}, 'replaced')
+            else:
+                if _match(entry.name):
+                    yield FindResult(path, os.path.realpath(path))
+
+    yield from _scan(directory, root_real, 0,
+                     frozenset([os.path.normcase(root_real)]), None)
     return
 
 

@@ -9,6 +9,7 @@ scheme (`YY.MINOR.MICRO`).
 
 _(unreleased)_
 
+- Added `follow_links` and `dedupe_links` options to [`fileutils.iter_find_files`][fileutils.iter_find_files], with an optional symbolic-link traversal policy (`'never'` or `'within'` the root directory). When enabled, results are yielded as new [`fileutils.FindResult`][fileutils.FindResult] objects reporting the discovered path and resolved target, and link loops, broken links, and directories replaced during traversal are reported instead of silently skipped
 - Added `key` and `reverse` support to [`listutils.BarrelList.sort`][listutils.BarrelList.sort] ([#550](https://github.com/mahmoud/boltons/pull/550))
 - Added `start` and `stop` support to [`listutils.BarrelList.index`][listutils.BarrelList.index] ([#592](https://github.com/mahmoud/boltons/pull/592))
 - Added timezone suffix support (`Z`, `+HH:MM`, `-HHMM`, optional seconds) to [`timeutils.isoparse`][timeutils.isoparse], returning aware datetimes so aware `isoformat()` output round-trips ([#594](https://github.com/mahmoud/boltons/pull/594))
@@ -1254,6 +1255,7 @@ added in this release.
 [fileutils.AtomicSaver]: http://boltons.readthedocs.org/en/latest/fileutils.html#boltons.fileutils.AtomicSaver
 [fileutils.FilePerms]: http://boltons.readthedocs.org/en/latest/fileutils.html#boltons.fileutils.FilePerms
 [fileutils.iter_find_files]: http://boltons.readthedocs.org/en/latest/fileutils.html#boltons.fileutils.iter_find_files
+[fileutils.FindResult]: http://boltons.readthedocs.org/en/latest/fileutils.html#boltons.fileutils.FindResult
 [fileutils.mkdir_p]: http://boltons.readthedocs.org/en/latest/fileutils.html#boltons.fileutils.mkdir_p
 [fileutils.DummyFile]: http://boltons.readthedocs.org/en/latest/fileutils.html#boltons.fileutils.DummyFile
 [formatutils]: http://boltons.readthedocs.org/en/latest/formatutils.html
