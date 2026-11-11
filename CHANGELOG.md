@@ -9,6 +9,7 @@ scheme (`YY.MINOR.MICRO`).
 
 _(unreleased)_
 
+- Added optional `registry` argument to [`typeutils.make_sentinel`][typeutils.make_sentinel], registering sentinels as registry-scoped singletons whose identity survives copying and pickling, even across processes; serialized form references only explicitly registered names
 - Added `key` and `reverse` support to [`listutils.BarrelList.sort`][listutils.BarrelList.sort] ([#550](https://github.com/mahmoud/boltons/pull/550))
 - Added `start` and `stop` support to [`listutils.BarrelList.index`][listutils.BarrelList.index] ([#592](https://github.com/mahmoud/boltons/pull/592))
 - Added timezone suffix support (`Z`, `+HH:MM`, `-HHMM`, optional seconds) to [`timeutils.isoparse`][timeutils.isoparse], returning aware datetimes so aware `isoformat()` output round-trips ([#594](https://github.com/mahmoud/boltons/pull/594))

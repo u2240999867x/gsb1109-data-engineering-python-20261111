@@ -38,8 +38,22 @@ from collections import deque
 
 _issubclass = issubclass
 
+_sentinel_registries = {}
 
-def make_sentinel(name='_MISSING', var_name=None):
+
+def _get_registered_sentinel(registry, name):
+    # Unpickling helper for registered sentinels. Resolves strictly
+    # against explicitly registered names, never arbitrary module paths.
+    try:
+        return _sentinel_registries[registry][name]
+    except KeyError:
+        raise ValueError(
+            f'no sentinel named {name!r} registered in registry {registry!r};'
+            ' registered sentinels must be created with make_sentinel()'
+            ' before they can be deserialized') from None
+
+
+def make_sentinel(name='_MISSING', var_name=None, registry=None):
     """Creates and returns a new **instance** of a new class, suitable for
     usage as a "sentinel", a kind of singleton often used to indicate
     a value is missing when ``None`` is a valid input.
@@ -50,6 +64,13 @@ def make_sentinel(name='_MISSING', var_name=None):
             its respective module enable pickleability. Note:
             pickleable sentinels should be global constants at the top
             level of their module.
+        registry (str): Optionally, the name of a registry in which to
+            register the sentinel. Registered sentinels are singletons
+            within their registry: repeated calls with the same
+            ``registry`` and ``name`` return the same object, and
+            pickling and copying preserve that identity, even across
+            processes. Registries are namespaced, so two registries may
+            reuse the same ``name`` without their sentinels merging.
 
     >>> make_sentinel(var_name='_MISSING')
     _MISSING
@@ -70,18 +91,46 @@ def make_sentinel(name='_MISSING', var_name=None):
       >>> type(make_sentinel('TEST')) == type(make_sentinel('TEST'))
       False
 
+    Pass ``registry`` to opt out of that ephemerality. Registered
+    sentinels keep a consistent identity within their registry, which
+    survives copying, pickling, and transfer to another process:
+
+      >>> make_sentinel('SKIP', registry='tasks') is make_sentinel('SKIP', registry='tasks')
+      True
+      >>> make_sentinel('SKIP', registry='tasks') is make_sentinel('SKIP', registry='billing')
+      False
+
+    The serialized form of a registered sentinel references only its
+    registry and name, resolved against explicitly registered sentinels
+    on deserialization; arbitrary module paths are never consulted.
+
     """
+    if var_name and registry is not None:
+        raise ValueError('expected only one of var_name and registry, got both')
+    if registry is not None:
+        registry_map = _sentinel_registries.setdefault(registry, {})
+        try:
+            return registry_map[name]
+        except KeyError:
+            pass
+
     class Sentinel:
         def __init__(self):
             self.name = name
             self.var_name = var_name
+            self.registry = registry
 
         def __repr__(self):
             if self.var_name:
                 return self.var_name
+            if self.registry is not None:
+                return f'{self.__class__.__name__}({self.name!r}, registry={self.registry!r})'
             return f'{self.__class__.__name__}({self.name!r})'
 
-        if var_name:
+        if registry is not None:
+            def __reduce__(self):
+                return (_get_registered_sentinel, (registry, name))
+        elif var_name:
             def __reduce__(self):
                 return self.var_name
 
@@ -102,7 +151,10 @@ def make_sentinel(name='_MISSING', var_name=None):
                              ' be created from top-level module scopes')
         Sentinel.__module__ = module
 
-    return Sentinel()
+    ret = Sentinel()
+    if registry is not None:
+        registry_map[name] = ret
+    return ret
 
 
 def issubclass(subclass, baseclass):
