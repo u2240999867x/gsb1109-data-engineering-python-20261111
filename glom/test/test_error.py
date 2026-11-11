@@ -495,6 +495,8 @@ def test_all_public_errors():
 
     _test_exc(glom.CoalesceError, {}, glom.Coalesce('a', 'b'))
 
+    _test_exc(glom.ZipError, {'a': [1, 2], 'b': [1]}, glom.Zip({'a': 'a', 'b': 'b'}))
+
     _test_exc(glom.PathAssignError, object(), glom.Assign('a', 'b'))
 
     _test_exc(glom.PathDeleteError, object(), glom.Delete('a'))

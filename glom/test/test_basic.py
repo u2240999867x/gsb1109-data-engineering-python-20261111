@@ -4,7 +4,7 @@ from xml.etree import ElementTree as ElementTree
 import pytest
 
 from glom import glom, SKIP, STOP, Path, Inspect, Coalesce, CoalesceError, Val, Call, T, S, Invoke, Spec, Ref
-from glom import Auto, Fill, Iter, A, Vars, Val, GlomError, Pipe
+from glom import Auto, Fill, Iter, A, Vars, Val, GlomError, Pipe, Zip, ZipError
 
 import glom.core as glom_core
 from glom.core import UP, ROOT, bbformat, bbrepr
@@ -426,6 +426,54 @@ def test_ref():
 def test_pipe():
     assert glom(1, Pipe("__class__", "__name__", str.upper)) == 'INT'
     assert repr(Pipe(1, Pipe([2], dict))) == 'Pipe(1, Pipe([2], dict))'
+
+
+def test_zip():
+    target = {'skus': ['a1', 'b2', 'c3'],
+              'prices': [9.99, 4.5, 1.0],
+              'currency': 'USD'}
+    spec = Zip({'sku': 'skus', 'price': 'prices', 'currency': 'currency'})
+    assert glom(target, spec) == [
+        {'sku': 'a1', 'price': 9.99, 'currency': 'USD'},
+        {'sku': 'b2', 'price': 4.5, 'currency': 'USD'},
+        {'sku': 'c3', 'price': 1.0, 'currency': 'USD'}]
+
+    # target is not modified
+    assert target == {'skus': ['a1', 'b2', 'c3'],
+                      'prices': [9.99, 4.5, 1.0],
+                      'currency': 'USD'}
+
+    # tuples count as array columns, too
+    assert glom({'a': (1, 2), 'b': ('x', 'y')}, Zip({'a': 'a', 'b': 'b'})) == [
+        {'a': 1, 'b': 'x'}, {'a': 2, 'b': 'y'}]
+
+    # all-scalar columns broadcast to a single row
+    assert glom({'a': 1, 'b': 2}, Zip({'a': 'a', 'b': 'b'})) == [{'a': 1, 'b': 2}]
+
+    # empty arrays produce zero rows
+    assert glom({'a': [], 'b': [], 'c': 'x'}, Zip({'a': 'a', 'b': 'b', 'c': 'c'})) == []
+
+    # mismatched lengths raise instead of silently truncating like zip()
+    target = {'skus': ['a1', 'b2', 'c3'], 'prices': [9.99, 4.5]}
+    with pytest.raises(ZipError) as exc_info:
+        glom(target, Zip({'sku': 'skus', 'price': 'prices'}))
+    msg = exc_info.value.get_message()
+    assert "'skus'" in msg and '3 items' in msg
+    assert "'prices'" in msg and '2 items' in msg
+
+    # a length-1 array is not treated as a broadcastable scalar
+    with pytest.raises(ZipError):
+        glom({'a': [1], 'b': [1, 2]}, Zip({'a': 'a', 'b': 'b'}))
+
+    # subspecs can be arbitrary glom specs
+    target = {'items': {'skus': ['a1', 'b2'], 'prices': [9.99, 4.5]}}
+    assert glom(target, Zip({'sku': 'items.skus', 'price': 'items.prices'})) == [
+        {'sku': 'a1', 'price': 9.99}, {'sku': 'b2', 'price': 4.5}]
+
+    assert repr(Zip({'a': 'a'})) == "Zip({'a': 'a'})"
+
+    with pytest.raises(TypeError):
+        Zip(['not', 'a', 'dict'])
 
 
 _IS_PYPY = '__pypy__' in sys.builtin_module_names

@@ -87,6 +87,17 @@ specifiers to declare away overly branchy procedural code.
 .. autodata:: glom.STOP
 
 
+Aligning Parallel Arrays with Zip
+---------------------------------
+
+Some responses spread related values across parallel arrays, with
+scalars mixed in. Use :class:`Zip` to align the arrays into rows,
+broadcasting the scalars, with strict length checks instead of
+:func:`zip`-style truncation.
+
+.. autoclass:: glom.Zip
+
+
 Calling Callables with Invoke
 -----------------------------
 
@@ -236,6 +247,8 @@ and debugging exceptions, see ":doc:`debugging`".
 .. autoclass:: glom.PathAccessError
 
 .. autoclass:: glom.CoalesceError
+
+.. autoclass:: glom.ZipError
 
 .. autoclass:: glom.UnregisteredTarget
 

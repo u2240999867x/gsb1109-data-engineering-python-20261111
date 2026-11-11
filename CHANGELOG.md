@@ -12,6 +12,14 @@ The glom team's approach to updates can be summed up as:
 Check this page when upgrading, we strive to keep the updates
 summarized and well-linked.
 
+## Unreleased
+
+* Added the `Zip` specifier type, which aligns parallel arrays into
+  rows while broadcasting scalar values. Array columns must have equal
+  lengths; mismatches raise `ZipError` identifying each column's
+  source spec and length, rather than silently truncating like
+  Python's built-in `zip`.
+
 ## 25.12.0
 
 _(December 28, 2025)_

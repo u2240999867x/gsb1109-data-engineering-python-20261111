@@ -444,6 +444,48 @@ class CoalesceError(GlomError):
         return msg
 
 
+class ZipError(GlomError):
+    """This :exc:`GlomError` subtype is raised from within a
+    :class:`Zip` spec's processing, when the array columns cannot be
+    aligned into rows, e.g., when they have mismatched lengths.
+
+    The exception object itself keeps track of several values which
+    may be useful for processing:
+
+    Args:
+       zip_obj (Zip): The original failing spec, see :class:`Zip`'s
+          docs for details.
+       col_lengths (dict): A mapping of output key to
+          ``(subspec, length)`` pairs, identifying the source spec and
+          length of each array column.
+       path: Like many GlomErrors, this exception knows the path at
+          which it occurred.
+
+    >>> target = {'skus': ['a', 'b', 'c'], 'prices': [1, 2]}
+    >>> glom(target, Zip({'sku': 'skus', 'price': 'prices'}))
+    Traceback (most recent call last):
+    ...
+    ZipError: array columns have mismatched lengths: 'sku' from 'skus' has 3 items, 'price' from 'prices' has 2 items ...
+
+    """
+    def __init__(self, zip_obj, col_lengths, path):
+        self.zip_obj = zip_obj
+        self.col_lengths = col_lengths
+        self.path = path
+
+    def __repr__(self):
+        cn = self.__class__.__name__
+        return f'{cn}({self.zip_obj!r}, {self.col_lengths!r}, {self.path!r})'
+
+    def get_message(self):
+        col_descs = [f'{key!r} from {bbrepr(subspec)} has {length} items'
+                     for key, (subspec, length) in self.col_lengths.items()]
+        msg = 'array columns have mismatched lengths: ' + ', '.join(col_descs)
+        if self.path is not None:
+            msg += f' (at path {self.path!r})'
+        return msg
+
+
 class BadSpec(GlomError, TypeError):
     """Raised when a spec structure is malformed, e.g., when a specifier
     type is invalid for the current mode."""
@@ -942,6 +984,78 @@ class Coalesce:
     def __repr__(self):
         cn = self.__class__.__name__
         return format_invocation(cn, self.subspecs, self._orig_kwargs, repr=bbrepr)
+
+
+class Zip:
+    """The ``Zip`` specifier type aligns parallel arrays into a list of
+    rows, broadcasting scalar values across every row.
+
+    ``Zip`` takes a dict mapping output keys to subspecs. Each subspec
+    is evaluated against the target. Subspecs which produce lists (or
+    tuples) become array columns and are aligned element-wise into
+    rows; all other values are treated as scalars and broadcast to
+    every row:
+
+    >>> target = {'skus': ['a1', 'b2'], 'prices': [9.99, 4.5], 'currency': 'USD'}
+    >>> glom(target, Zip({'sku': 'skus', 'price': 'prices', 'currency': 'currency'}))
+    [{'sku': 'a1', 'price': 9.99, 'currency': 'USD'}, {'sku': 'b2', 'price': 4.5, 'currency': 'USD'}]
+
+    Unlike Python's built-in :func:`zip`, array columns must all have
+    the same length. A column which comes up short raises
+    :exc:`ZipError` identifying the source spec and length of every
+    array column, rather than silently dropping trailing items:
+
+    >>> glom({'a': [1, 2, 3], 'b': [1, 2]}, Zip({'a': 'a', 'b': 'b'}))
+    Traceback (most recent call last):
+    ...
+    ZipError: array columns have mismatched lengths: 'a' from 'a' has 3 items, 'b' from 'b' has 2 items ...
+
+    Note that a length-1 list is still an array column, not a
+    broadcastable scalar, so it will not be implicitly repeated:
+
+    >>> glom({'a': [1], 'b': [1, 2]}, Zip({'a': 'a', 'b': 'b'}))
+    Traceback (most recent call last):
+    ...
+    ZipError: array columns have mismatched lengths: 'a' from 'a' has 1 items, 'b' from 'b' has 2 items ...
+
+    If no subspec produces an array, all scalars broadcast to a single
+    row. ``Zip`` only reads from the target; it never modifies it.
+
+    Args:
+       spec (dict): A mapping of output keys to subspecs, each of
+          which is evaluated against the target to produce a column.
+
+    """
+    def __init__(self, spec):
+        if not isinstance(spec, dict):
+            raise TypeError('expected Zip spec to be a dict mapping output keys'
+                            ' to subspecs, not: %r' % (spec,))
+        self.spec = dict(spec)
+
+    def glomit(self, target, scope):
+        cols = {}
+        for key, subspec in self.spec.items():
+            cols[key] = scope[glom](target, subspec, scope)
+        arr_keys = [k for k, v in cols.items() if isinstance(v, (list, tuple))]
+        if not arr_keys:
+            # all scalar columns broadcast to a single row
+            return [cols]
+        lengths = {k: len(cols[k]) for k in arr_keys}
+        if len(set(lengths.values())) > 1:
+            col_lengths = {k: (self.spec[k], lengths[k]) for k in arr_keys}
+            raise ZipError(self, col_lengths, scope[Path])
+        row_count = lengths[arr_keys[0]]
+        rows = []
+        for i in range(row_count):
+            row = {}
+            for key, col in cols.items():
+                row[key] = col[i] if key in lengths else col
+            rows.append(row)
+        return rows
+
+    def __repr__(self):
+        cn = self.__class__.__name__
+        return format_invocation(cn, (self.spec,), repr=bbrepr)
 
 
 class Inspect:
