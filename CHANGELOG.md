@@ -3,6 +3,12 @@
 
 ### Latest
 
+* FEATURE : Values now expose their origin (source text vs schema default)
+  through `is_default`, `value_source` and `provenance()`.
+* FEATURE : `as_yaml(include_defaults=True)` writes current defaults explicitly.
+* BUGFIX : Schema defaults no longer report a made-up source line.
+* BUGFIX : Editing inside a defaulted mapping no longer loses the edit when
+  the document is saved or another value is changed.
 * BUGFIX : Fully parse URL, fix #141
 
 

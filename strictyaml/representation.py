@@ -3,7 +3,7 @@ from strictyaml.exceptions import raise_type_error, YAMLSerializationError
 from strictyaml.yamllocation import YAMLChunk
 from strictyaml.dumper import StrictYAMLDumper
 from strictyaml.ruamel import dump, scalarstring
-from copy import copy
+from copy import copy, deepcopy
 import decimal
 import sys
 
@@ -145,30 +145,147 @@ class YAML(object):
         return self._chunk.contents
 
     @property
+    def is_default(self):
+        """
+        Return True if this value was supplied by the schema (an Optional
+        default) rather than written in the source text.
+
+        Defaults supplied by the schema, including defaults nested inside
+        other defaults, are reported as defaults. Values which were explicitly
+        set after loading are not defaults.
+        """
+        return self._chunk.is_default()
+
+    @property
+    def value_source(self):
+        """
+        Return ``"original"`` if this value came from the source text or was
+        explicitly written after loading, otherwise ``"default"``.
+        """
+        return "default" if self.is_default else "original"
+
+    @property
+    def source(self):
+        """Alias for :attr:`value_source`."""
+        return self.value_source
+
+    @property
+    def from_default(self):
+        """Alias for :attr:`is_default`."""
+        return self.is_default
+
+    def is_default_value(self):
+        """Alias for :attr:`is_default`."""
+        return self.is_default
+
+    @property
+    def has_line(self):
+        """
+        Return True if this value has a corresponding line in the source text.
+
+        Values supplied by schema defaults have no source line, even though
+        they are present in memory.
+        """
+        return not self.is_default
+
+    def provenance(self):
+        """
+        Return a nested description of where every value came from.
+
+        Mapping children are keyed by their data value, sequences by index.
+        Each node is described by ``source`` (``"original"`` or ``"default"``)
+        and either ``value`` for scalars or ``children`` for mappings and
+        sequences, so defaults nested inside defaults are visible.
+        """
+        if self.is_mapping():
+            return {
+                "source": self.value_source,
+                "children": {
+                    key.data: value.provenance()
+                    for key, value in self._value.items()
+                },
+            }
+        elif self.is_sequence():
+            return {
+                "source": self.value_source,
+                "children": [item.provenance() for item in self._value],
+            }
+        return {"source": self.value_source, "value": self.data}
+
+    def default_keys(self):
+        """
+        Return the keys of this mapping whose values came from schema defaults.
+        """
+        if not self.is_mapping():
+            raise TypeError(
+                "{0} is not a mapping, cannot use .default_keys()".format(repr(self))
+            )
+        return [
+            key.data for key, value in self._value.items() if value.is_default
+        ]
+
+    def explicit_keys(self):
+        """
+        Return the keys of this mapping whose values came from the source text
+        or were explicitly written.
+        """
+        if not self.is_mapping():
+            raise TypeError(
+                "{0} is not a mapping, cannot use .explicit_keys()".format(repr(self))
+            )
+        return [
+            key.data
+            for key, value in self._value.items()
+            if not value.is_default
+        ]
+
+    def user_keys(self):
+        """Alias for :meth:`explicit_keys`."""
+        return self.explicit_keys()
+
+    @property
     def start_line(self):
         """
         Return line number that the element starts on (including preceding comments).
+
+        Returns None for values supplied by schema defaults, which have no
+        corresponding line in the original document.
         """
+        if self.is_default:
+            return None
         return self._chunk.start_line()
 
     @property
     def end_line(self):
         """
         Return line number that the element ends on (including trailing comments).
+
+        Returns None for values supplied by schema defaults, which have no
+        corresponding line in the original document.
         """
+        if self.is_default:
+            return None
         return self._chunk.end_line()
 
     def lines(self):
         """
         Return a string of the lines which make up the selected line
         including preceding and trailing comments.
+
+        Returns None for values supplied by schema defaults.
         """
+        if self.is_default:
+            return None
         return self._chunk.lines()
 
     def lines_before(self, how_many):
+        if self.is_default:
+            return None
         return self._chunk.lines_before(how_many)
 
     def lines_after(self, how_many):
+        if self.is_default:
+            return None
         return self._chunk.lines_after(how_many)
 
     def __float__(self):
@@ -250,9 +367,47 @@ class YAML(object):
         # pointing at the original document.
         self._chunk._ruamelparsed = old_chunk._ruamelparsed
         self._chunk._strictparsed = old_chunk._strictparsed
+        self._mark_edited(strictindex, value)
+
+    def _mark_edited(self, strictindex, value):
+        path = self._chunk.path()
+        if path is None:
+            return
+        if self.is_mapping():
+            key = self._chunk.ruamelindex(strictindex)
+        else:
+            key = strictindex
+
+        data = value.data if isinstance(value, YAML) else value
+        self._add_explicit_paths(path + (key,), data)
+
+    def _add_explicit_paths(self, path, data):
+        # Mark the value the caller supplied (and everything below it) as
+        # explicitly written. Schema defaults re-added around it are not part
+        # of the supplied data, so they remain defaults and stay hidden unless
+        # the caller supplied them too.
+        self._chunk._edited_paths.add(path)
+        if isinstance(data, dict):
+            for key, value in data.items():
+                self._add_explicit_paths(path + (key,), value)
+        elif isinstance(data, list):
+            for index, value in enumerate(data):
+                self._add_explicit_paths(path + (index,), value)
 
     def __delitem__(self, index):
         strictindex = self._strictindex(index)
+        path = self._chunk.path()
+        if path is not None:
+            if self.is_mapping():
+                target = path + (self._chunk.ruamelindex(strictindex),)
+            else:
+                target = path + (strictindex,)
+            for edited_path in list(self._chunk._edited_paths):
+                if (
+                    len(edited_path) >= len(target)
+                    and edited_path[: len(target)] == target
+                ):
+                    self._chunk._edited_paths.discard(edited_path)
         del self._value[strictindex]
         del self._chunk.contents[self._chunk.ruamelindex(strictindex)]
 
@@ -262,11 +417,81 @@ class YAML(object):
     def __len__(self):
         return len(self._value)
 
-    def as_yaml(self):
+    def _has_explicit_descendant(self):
+        if self.is_mapping():
+            return any(
+                value._has_explicit_descendant() or not value.is_default
+                for value in self._value.values()
+            )
+        elif self.is_sequence():
+            return any(
+                item._has_explicit_descendant() or not item.is_default
+                for item in self._value
+            )
+        return False
+
+    def _prune_defaults(self, real_node):
+        """
+        Remove schema defaults from a marked-up copy of the document.
+
+        A default is kept only when it contains an explicitly written
+        descendant, so editing a nested value does not cause sibling defaults
+        to be written out.
+        """
+        if self.is_mapping():
+            if not isinstance(real_node, CommentedMap):
+                return
+            for key, value in list(self._value.items()):
+                strict_name = key.data
+                name = self._chunk.ruamelindex(strict_name)
+                if name not in real_node:
+                    name = strict_name
+                if name not in real_node:
+                    continue
+                if value.is_default and not value._has_explicit_descendant():
+                    del real_node[name]
+                else:
+                    value._prune_defaults(real_node[name])
+        elif self.is_sequence():
+            if not isinstance(real_node, CommentedSeq):
+                return
+            # A sequence is written out as a whole: dropping default items
+            # would change the length/positions of an edited list.
+            keep_all = self.is_default and self._has_explicit_descendant()
+            kept = []
+            for index, item in enumerate(self._value):
+                if index >= len(real_node):
+                    continue
+                if (
+                    not keep_all
+                    and item.is_default
+                    and not item._has_explicit_descendant()
+                ):
+                    continue
+                item._prune_defaults(real_node[index])
+                kept.append(real_node[index])
+            real_node[:] = kept
+
+    def as_yaml(self, include_defaults=False):
         """
         Render the YAML node and subnodes as string.
+
+        By default only values which came from the source text (or were
+        explicitly written after loading) are rendered; schema defaults are
+        omitted. Pass ``include_defaults=True`` to also render every current
+        default value explicitly.
         """
-        dumped = dump(self.as_marked_up(), Dumper=StrictYAMLDumper, allow_unicode=True)
+        if include_defaults:
+            marked_up = deepcopy(self.as_marked_up())
+        else:
+            if self.is_default and not self._has_explicit_descendant():
+                # Nothing under this node was written by the user and the
+                # node is not itself in the source text - there is nothing to
+                # save.
+                return ""
+            marked_up = deepcopy(self.as_marked_up())
+            self._prune_defaults(marked_up)
+        dumped = dump(marked_up, Dumper=StrictYAMLDumper, allow_unicode=True)
         return dumped if sys.version_info[0] == 3 else dumped.decode("utf8")
 
     def items(self):

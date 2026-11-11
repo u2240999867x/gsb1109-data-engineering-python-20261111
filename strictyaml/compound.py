@@ -4,6 +4,7 @@ from strictyaml.ruamel.comments import CommentedMap, CommentedSeq
 from strictyaml.representation import YAML
 from strictyaml.scalar import ScalarValidator, Str
 from strictyaml.yamllocation import YAMLChunk
+from copy import deepcopy
 import sys
 
 
@@ -177,24 +178,32 @@ class Map(MapValidator):
                 yaml_key = self._key_validator(key_chunk)
                 strictindex = yaml_key.data
                 value_validator = self.get_validator(default_key)
+                # Build and validate a self-contained copy so the complete
+                # markup (including nested defaults) can be synthesized.
                 new_value = value_validator(
                     YAMLChunk(value_validator.to_yaml(default_data))
                 )
-                forked_chunk = chunk.fork(strictindex, new_value)
-                forked_chunk.val(strictindex).process(new_value)
-                updated_value = value_validator(forked_chunk.val(strictindex))
-                updated_value._chunk.make_child_of(chunk.val(strictindex))
-                # marked_up = new_value.as_marked_up()
-                # chunk.contents[chunk.ruamelindex(strictindex)] = marked_up
+                marked_up = new_value.as_marked_up()
+
+                # Insert the default into the actual document. This keeps any
+                # later edits to the defaulted subtree in place, and lets all
+                # the ordinary editing machinery operate on it. Provenance
+                # (YAMLChunk.is_default) records that it was not in the source.
                 chunk.add_key_association(default_key, strictindex)
+                chunk.contents[chunk.ruamelindex(strictindex)] = marked_up
+
                 sp = chunk.strictparsed()
                 if isinstance(sp, YAML):
-                    # Do not trigger __setitem__ validation at this point, as
-                    # we just ran the validator, and
-                    # representation.py:revalidate() doesn't overwrite the
-                    # _validator property until after all values are checked,
-                    # which leads to an exception being raised if it is
-                    # re-checked.
+                    sp._value[yaml_key] = deepcopy(marked_up)
+                else:
+                    sp[yaml_key] = deepcopy(marked_up)
+
+                # Revalidate against the real document to obtain live chunks.
+                updated_value = value_validator(chunk.val(strictindex))
+                yaml_key._chunk = chunk.key(
+                    chunk.ruamelindex(strictindex), strictindex
+                )
+                if isinstance(sp, YAML):
                     sp._value[yaml_key] = updated_value
                 else:
                     sp[yaml_key] = updated_value

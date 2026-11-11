@@ -28,6 +28,8 @@ class YAMLChunk(object):
         label=None,
         strictparsed=None,
         key_association=None,
+        original_document=None,
+        edited_paths=None,
     ):
         self._ruamelparsed = ruamelparsed
         self._strictparsed = (
@@ -39,6 +41,66 @@ class YAMLChunk(object):
         # Associates strictparsed key names with ruamelparsed key names
         # E.g. "my-key-name" -> "My Key name"
         self._key_association = {} if key_association is None else key_association
+
+        # Snapshot of the document as it existed in the source text, before
+        # any schema defaults were added. Used to determine where each value
+        # came from (see is_default()). Child chunks share this snapshot.
+        self._original_document = (
+            deepcopy(ruamelparsed) if original_document is None else original_document
+        )
+
+        # Set of paths (tuples of keys/indexes) which were explicitly written
+        # by the caller, shared by every chunk in the document. A path that
+        # does not exist in the original document is a schema default unless
+        # it was explicitly written.
+        self._edited_paths = set() if edited_paths is None else edited_paths
+
+    def path(self):
+        """
+        Return this chunk's location as a tuple of mapping keys / sequence
+        indexes, relative to the document root.
+
+        Returns None for chunks which point inside a scalar value (textslice).
+        """
+        result = []
+        for index_type, index in self._pointer._indices:
+            if index_type in ("val", "key"):
+                result.append(index[0])
+            elif index_type == "index":
+                result.append(index)
+            else:
+                return None
+        return tuple(result)
+
+    def _path_in_document(self, path):
+        if path is None:
+            return True
+
+        segment = self._original_document
+        for part in path:
+            if isinstance(segment, CommentedMap):
+                if part not in segment:
+                    return False
+                segment = segment[part]
+            elif isinstance(segment, CommentedSeq):
+                if not isinstance(part, int) or part < 0 or part >= len(segment):
+                    return False
+                segment = segment[part]
+            else:
+                return False
+        return True
+
+    def is_default(self):
+        """
+        Return True if this chunk's value came from a schema default rather
+        than from the source text or an explicit write.
+        """
+        path = self.path()
+        if path is None:
+            return False
+        if path in self._edited_paths:
+            return False
+        return not self._path_in_document(path)
 
     def expecting_but_found(self, expecting, found=None):
         raise YAMLValidationError(
@@ -150,6 +212,8 @@ class YAMLChunk(object):
             pointer=self.pointer,
             label=self.label,
             key_association=copy(self._key_association),
+            original_document=self._original_document,
+            edited_paths=self._edited_paths,
         )
         if self.is_scalar():
             # Necessary for e.g. EmptyDict, which reports as a scalar.
@@ -194,6 +258,8 @@ class YAMLChunk(object):
             label=self._label,
             strictparsed=self._strictparsed,
             key_association=copy(self._key_association),
+            original_document=self._original_document,
+            edited_paths=self._edited_paths,
         )
 
     def index(self, strictindex):
