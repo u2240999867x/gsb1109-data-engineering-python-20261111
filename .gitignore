@@ -1,0 +1,29 @@
+# Python files
+*.pyc
+*.pyo
+__pycache__/
+.cache
+
+# Test files
+.pytest_cache/
+temp/
+.tox
+.coverage
+.testmondata
+.benchmarks
+
+# Deb files
+debian/files
+debian/*debhelper*
+debian/*substvars
+
+# Build files
+.eggs/
+*.egg-info/
+build/
+_build/
+dist/
+venv/
+
+# Editors
+.vscode

@@ -1,0 +1,302 @@
+=== UNRELEASED
+
+* Fixed `$` in `patternProperties` matching before a trailing newline, which also made a `pattern` with the same regex accept a trailing newline
+
+=== 2.22.3 (2026-11-01)
+
+* Fixed property names with `{` or `}` being evaluated as format string in error messages
+* Fixed numeric keywords (minimum, maximum, multipleOf, exclusiveMinimum, exclusiveMaximum) being applied to booleans
+* Fixed `propertyNames: false` crashing on non-object values
+* Fixed the `date-time` format accepting months, days and hours out of range (such as `2020-19-39T29:00:00Z`) and rejecting a leap second (`23:59:60Z`)
+* Fixed the `date` and `date-time` formats accepting days that do not exist in their month, such as `2021-02-29` and `2021-04-31`
+* Fixed the `time` format accepting hours, minutes, seconds and offsets out of range (such as `29:99:99`)
+* Fixed `minimum` and `maximum` being exclusive in draft 06 and later when `exclusiveMinimum` or `exclusiveMaximum` is set to a number other than zero
+* Fixed bools in `uniqueItems`
+* Added type annotations for public API and `py.typed` marker (PEP 561)
+* Added `message` to `JsonSchemaValuesException` joining messages of all collected errors
+
+=== 2.22.2 (2026-08-15)
+
+* Fixed wrong results of anyOf, oneOf, not, if/then/else, contains and propertyNames when `fast_fail` is off
+* Fixed collecting errors from subschemas behind `$ref` when `fast_fail` is off
+* Fixed escaping property name in boolean `dependencies` validation (prevents schema-controlled code injection)
+
+=== 2.22.1 (2026-07-27)
+
+* Fixed min Python version
+
+=== 2.22.0 (2026-07-25)
+
+* Fixed IPv4 validation (rejecting leading zeros)
+* Fixed empty items and patternProperties
+* Fixed protection from deeply nested schemas potentially causing denial of service
+* Fixed comparing values for enum and const validations
+* Fixed resolving plain-name ref fragments
+* Fixed not throwing when unknown format is used
+* Fixed compilation of not, if/then/else, items, additionalItems, propertyNames and schema dependencies when a subschema generates no validation code
+* Added option to get all the errors (set `fast_fail` to `False`)
+* Added basic type hints
+* Added support of duration and uuid formats from draft-2019
+
+=== 2.21.2 (2025-08-14)
+
+* Fixed regexp for IPv6 format
+
+=== 2.21.1 (2024-12-02)
+
+* Fixed ResourceWarning where file was not properly closed
+* Fixed regexp for date format
+
+=== 2.21.0 (2024-11-27)
+
+* Updated test suite
+* Fixed detecting when infinity is reached with multipleOf
+* Fixed that min/max items/lenght/properties can be float
+* Fixed that everything with empty `not` is invalid
+* Fixed missing re import when using regex pattern
+* Improved regexp for email format to comfort test suite
+* Improved regexp for date format to comfort test suite
+* Improved regexp for ipv4 format to comfort test suite
+* Added partial support of idn-hostname format
+* Added `detailed_exceptions` flag (default to True to avoid breaking change) - when used, results are twice as fast
+
+=== 2.20.0 (2024-06-15)
+
+* Added validations at compile time:
+    * `required` must have unique items
+    * checking if schema is not allowing `required` items (item is required, but is not listed in properties)
+
+=== 2.19.1 (2023-12-28)
+
+* Fixed date format to accept only two digit months and days
+
+=== 2.19.0 (2023-11-14)
+
+* Added `use_formats` parameter to allow disable automatic assertions
+
+=== 2.18.1 (2023-10-01)
+
+* Lazy import of urllib to improve import performance
+
+=== 2.18.0 (2023-07-22)
+
+* Improved error message for required props - only missing are reported
+* Fixed support of boolean schema in if-then-else application
+
+=== 2.17.1 (2023-05-22)
+
+* Fixed tests in sdist
+
+=== 2.17.0 (2023-05-21)
+
+* Added support for Decimals
+* Added tests in sdist
+
+=== 2.16.3 (2023-02-25)
+
+* Fix variable name resolving with references
+
+=== 2.16.2 (2022-08-10)
+
+* Fix compile to code tests to run them on any platform
+
+
+=== 2.16.1 (2022-07-17)
+
+* Fix uniqueItems when explicitly set to False
+
+
+=== 2.16.0 (2022-07-17)
+
+* Fix generating invalid code for some schemas using items
+* Preserving full path in combination with $ref
+* Improved error messages for oneOf and anyOf
+
+
+=== 2.15.3 (2022-01-09)
+
+* Fix swapping handlers
+* Fix tests
+* Readable regexps in generated code
+
+
+=== 2.15.2 (2021-12-12)
+
+* Fix nested oneOf and anyOf
+* Fix if-else block in anyOf block
+* Fix uniqueItems including lists or dicts
+* Add option to pass custom formats in generated code
+
+
+=== 2.15.1 (2021-05-05)
+
+* Fix parsing date-time with +hhmm format
+* Fix generating code with custom regular expressions
+
+
+=== 2.15.0 (2021-02-01)
+
+* Fix additional property equal to empty object is the same as True
+* Fix const with "
+* Add const to error message
+* Add JsonSchemaValueException (replacement for JsonSchemaException)
+    * JsonSchemaException is base exception
+    * JsonSchemaDefinitionException no longer inherits from JsonSchemaValueException
+* New option `use_default` to have option turn off default feature (`True` by default to be compatible)
+
+
+=== 2.14.5 (2020-08-17)
+
+* Fix missing dependencies
+* Fix schema cache
+
+
+=== 2.14.4 (2020-03-19)
+
+* Fix $id property
+* Add extra properties to error message when additionalProperties are set to False
+* Better exception message when referencing schema is not valid JSON
+
+
+=== 2.14.3 (2020-02-27)
+
+* Tuple is also valid array
+
+
+=== 2.14.2 (2019-12-11)
+
+* Fix of `additionalProperties=true` for JSON schema 4
+* Use decimal for multipleOf implementation and add respective tests
+* Better escaping of definition names
+
+
+=== 2.14.1 (2019-10-09)
+
+* Fix of undefined format exception message
+
+
+=== 2.14.0 (2019-10-08)
+
+* Optimization: do not do the same type checks, keep it in one block if possible
+* More context in JsonSchemaException (value, variable_name, variable_path, definition, rule and rule_definition)
+* Possibility to pass custom formats
+* Raise JsonSchemaDefinitionException when definition of property is not valid
+* Fix of uniqueItems when used with other than array type
+* Fix of date-time regexp (time zone is required by RFC 3339)
+
+
+=== 2.13 (2019-06-10)
+
+* Resolved Python 3.7 warnings
+* Updated JSON Schema test suites
+    * Fix of date-time regexp (allow small T and Z).
+    * Fix escaping (proper handling of \n, \r or " everywhere).
+
+
+=== 2.12 (2019-05-24)
+
+* Fix of properties (local variable referenced before assignment).
+
+
+=== 2.11 (2019-04-16)
+
+* Fix of additionalProperties (colliding variable names).
+
+
+=== 2.10 (2019-04-15)
+
+* Fix pattern regexps with a space.
+
+
+=== 2.9 (2019-03-04)
+
+* Use of urllib instead of requests for smaller memory usage.
+
+
+=== 2.8 (2019-01-05)
+
+* Fix quotes in enum generating invalid code
+
+
+=== 2.7 (2018-11-16)
+
+* Fix regexps for Python 3.7
+
+
+=== 2.6 (2018-11-01)
+
+* Swap $ in regexps to \Z to follow ECMA 262 ($ matches really the end of the string, not the end or new line and the end). Because of that your regular expressions have to escape dollar when used as regular character.
+
+
+=== 2.5 (2018-10-22)
+
+* E-mail regex allows any e-mail with @
+
+
+=== 2.4 (2018-09-27)
+
+* Fix overriding variables (in pattern properties, property names, unique items and contains)
+* Fix string in const
+* Improve security: not generating code from any definition
+* Added validate function for lazy programmers
+
+
+=== 2.3 (2018-09-14) ===
+
+* Fix regex of hostname
+
+
+=== 2.2 (2018-09-12) ===
+
+* Fix code generation with long regex patterns
+* Fix regex of date-time (allow time without miliseconds)
+
+
+=== 2.1 (2018-09-12) ===
+
+* Fix code generation with regex patterns
+
+
+=== 2.0 (2018-09-07) ===
+
+* Support of draft-06
+* Support of draft-07
+* Code generation to a file
+
+
+=== 1.6 (2018-06-21) ===
+
+* Bugfixing
+
+
+=== 1.5 (2018-06-20) ===
+
+* Support of definitions
+* Support of referencies
+
+
+=== 1.4 (2018-06-11) ===
+
+* Better date-time regex
+* Support of dependencies
+
+
+=== 1.3 (2018-04-25) ===
+
+* Fix patter inside of anyOf
+
+
+=== 1.2 (2018-04-24) ===
+
+* Support of formats
+* Support of properties
+
+
+=== 1.1 (2017-01-03) ===
+
+* Support of float numbers
+
+
+=== 1.0 (2016-09-23) ===
+
+* First version
