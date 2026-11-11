@@ -188,6 +188,17 @@ class NonExistentKey(KeyError, TOMLKitError):
         super().__init__(message)
 
 
+class NonUniqueKeyError(TOMLKitError):
+    """
+    More than one element matched a key that was expected to be unique.
+    """
+
+    def __init__(self, key: object, value: object) -> None:
+        message = f'More than one element with "{key}" = {value!r} exists.'
+
+        super().__init__(message)
+
+
 class KeyAlreadyPresent(TOMLKitError):
     """
     An already present key was used.

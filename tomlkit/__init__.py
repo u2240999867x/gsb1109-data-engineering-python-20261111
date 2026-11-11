@@ -23,6 +23,7 @@ from tomlkit.api import string
 from tomlkit.api import table
 from tomlkit.api import time
 from tomlkit.api import unregister_encoder
+from tomlkit.api import update_aot_item
 from tomlkit.api import value
 from tomlkit.api import ws
 
@@ -54,6 +55,7 @@ __all__ = [
     "table",
     "time",
     "unregister_encoder",
+    "update_aot_item",
     "value",
     "ws",
 ]

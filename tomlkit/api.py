@@ -14,6 +14,8 @@ from typing import TypeVar
 from tomlkit._utils import parse_rfc3339
 from tomlkit._utils import validate_comment
 from tomlkit.container import Container
+from tomlkit.exceptions import NonExistentKey
+from tomlkit.exceptions import NonUniqueKeyError
 from tomlkit.exceptions import UnexpectedCharError
 from tomlkit.items import CUSTOM_ENCODERS
 from tomlkit.items import AoT
@@ -274,6 +276,73 @@ def aot() -> AoT:
     x = 1
     """
     return AoT([])
+
+
+def update_aot_item(
+    aot: AoT,
+    key: str,
+    value: Any,
+    updates: Mapping[str, Any],
+    *,
+    create: bool = False,
+) -> Table:
+    """Update the fields of the array-of-tables element identified by a
+    business key, without relying on its position.
+
+    The element is located by comparing the unwrapped value of its ``key``
+    field against ``value``. Only the fields given in ``updates`` are
+    modified; comments, whitespace and any other fields of the element are
+    left untouched, as is the order of the remaining elements.
+
+    If more than one element matches, a ``NonUniqueKeyError`` is raised. If
+    no element matches, a ``NonExistentKey`` error is raised unless
+    ``create=True``, in which case a new element (carrying ``key``, ``value``
+    and ``updates``) is appended to the array.
+
+    Returns the updated (or newly created) table.
+
+    :Example:
+
+    >>> doc = parse('[[sources]]\\nname = "main"\\nurl = "https://a"\\n')
+    >>> update_aot_item(doc["sources"], "name", "main", {"url": "https://b"})
+    {'name': 'main', 'url': 'https://b'}
+    >>> print(doc.as_string())
+    [[sources]]
+    name = "main"
+    url = "https://b"
+    """
+    if not isinstance(aot, AoT):
+        raise TypeError(f"Expected an AoT, got {type(aot)}")
+
+    def _unwrap(v: Any) -> Any:
+        return v.unwrap() if hasattr(v, "unwrap") else v
+
+    expected = _unwrap(value)
+    matches = [
+        element
+        for element in aot.body
+        if key in element and _unwrap(element[key]) == expected
+    ]
+
+    if len(matches) > 1:
+        raise NonUniqueKeyError(key, expected)
+
+    if not matches:
+        if not create:
+            raise NonExistentKey(value)
+        element = table()
+        element[key] = value
+        for update_key, update_value in updates.items():
+            element[update_key] = update_value
+        if len(aot) and aot._parsed and "\n" not in element.trivia.indent:
+            element.trivia.indent = "\n" + element.trivia.indent
+        aot.append(element)
+        return element
+
+    element = matches[0]
+    for update_key, update_value in updates.items():
+        element[update_key] = update_value
+    return element
 
 
 def key(k: str | Iterable[str]) -> Key:
