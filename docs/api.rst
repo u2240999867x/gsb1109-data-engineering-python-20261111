@@ -51,6 +51,8 @@ These tools peek at an iterable's values without advancing it.
 .. autofunction:: spy
 .. autoclass:: peekable
 .. autoclass:: seekable
+.. autoclass:: taste_session
+.. autoclass:: TasteBudgetExceeded
 
 
 Windowing

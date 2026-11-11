@@ -1232,6 +1232,162 @@ class SpyTests(TestCase):
         )
 
 
+class TasteSessionTests(TestCase):
+    """Tests for ``taste_session()``"""
+
+    def test_basic_tasting_and_budget_tracking(self):
+        session = mi.taste_session(iter(range(6)), max_items=3)
+        first = session.candidate()
+        self.assertEqual(next(first), 0)
+        self.assertEqual(next(first), 1)
+        self.assertEqual(session.items_read, 2)
+        self.assertEqual(session.remaining_budget, 1)
+
+        second = session.candidate()
+        # Replaying buffered items does not consume the budget.
+        self.assertEqual(next(second), 0)
+        self.assertEqual(next(second), 1)
+        self.assertEqual(session.items_read, 2)
+        self.assertEqual(session.remaining_budget, 1)
+
+        self.assertEqual(next(first), 2)
+        self.assertEqual(session.items_read, 3)
+        self.assertEqual(session.remaining_budget, 0)
+
+    def test_budget_exceeded_does_not_drain_source(self):
+        source = iter(range(10))
+        session = mi.taste_session(source, max_items=2)
+        candidate = session.candidate()
+        self.assertEqual(next(candidate), 0)
+        self.assertEqual(next(candidate), 1)
+
+        with self.assertRaises(mi.TasteBudgetExceeded):
+            next(candidate)
+        # The failed read neither advances the source nor the candidate.
+        self.assertEqual(session.items_read, 2)
+        self.assertEqual(next(source), 2)
+        with self.assertRaises(mi.TasteBudgetExceeded):
+            next(candidate)
+
+    def test_candidates_advance_independently(self):
+        session = mi.taste_session(iter('abcdef'), max_items=4)
+        first = session.candidate()
+        second = session.candidate()
+
+        self.assertEqual(next(first), 'a')
+        self.assertEqual(next(first), 'b')
+        self.assertEqual(next(second), 'a')
+        self.assertEqual(next(first), 'c')
+        self.assertEqual(next(second), 'b')
+        self.assertEqual(next(second), 'c')
+        self.assertEqual(next(second), 'd')
+        self.assertEqual(session.items_read, 4)
+
+    def test_commit_returns_full_input(self):
+        session = mi.taste_session(iter(range(8)), max_items=3)
+        first = session.candidate()
+        second = session.candidate()
+        next(first)
+        next(first)
+        next(second)
+
+        winner = session.commit(second)
+        self.assertEqual(list(winner), list(range(8)))
+
+    def test_commit_invalidates_candidates(self):
+        session = mi.taste_session(iter(range(8)), max_items=3)
+        first = session.candidate()
+        second = session.candidate()
+        next(first)
+        winner = session.commit(second)
+
+        with self.assertRaises(ValueError):
+            next(first)
+        with self.assertRaises(ValueError):
+            next(second)
+        list(winner)
+
+    def test_commit_then_session_is_closed(self):
+        session = mi.taste_session(iter(range(4)), max_items=2)
+        candidate = session.candidate()
+        next(candidate)
+        list(session.commit(candidate))
+
+        with self.assertRaises(ValueError):
+            session.candidate()
+        with self.assertRaises(ValueError):
+            session.commit(candidate)
+        with self.assertRaises(ValueError):
+            session.abandon()
+
+    def test_commit_rejects_foreign_candidate(self):
+        session = mi.taste_session(iter(range(4)), max_items=2)
+        other = mi.taste_session(iter(range(4)), max_items=2)
+        foreign = other.candidate()
+        with self.assertRaises(ValueError):
+            session.commit(foreign)
+        with self.assertRaises(ValueError):
+            session.commit(iter(range(4)))
+        # The rejected session is still usable.
+        self.assertEqual(next(session.candidate()), 0)
+
+    def test_abandon_returns_prefix_and_remainder(self):
+        source = iter('abcdef')
+        session = mi.taste_session(source, max_items=3)
+        candidate = session.candidate()
+        next(candidate)
+        next(candidate)
+
+        prefix, remainder = session.abandon()
+        self.assertEqual(prefix, ['a', 'b'])
+        self.assertIs(remainder, source)
+        self.assertEqual(list(remainder), ['c', 'd', 'e', 'f'])
+
+    def test_abandon_invalidates_candidates_and_closes_session(self):
+        session = mi.taste_session(iter(range(6)), max_items=3)
+        candidate = session.candidate()
+        next(candidate)
+        prefix, remainder = session.abandon()
+        self.assertEqual(prefix, [0])
+
+        with self.assertRaises(ValueError):
+            next(candidate)
+        with self.assertRaises(ValueError):
+            session.candidate()
+        with self.assertRaises(ValueError):
+            session.abandon()
+        self.assertEqual(list(remainder), [1, 2, 3, 4, 5])
+
+    def test_abandon_without_reading_anything(self):
+        source = iter([1, 2, 3])
+        session = mi.taste_session(source, max_items=2)
+        session.candidate()
+        prefix, remainder = session.abandon()
+        self.assertEqual(prefix, [])
+        self.assertEqual(list(remainder), [1, 2, 3])
+
+    def test_zero_budget(self):
+        session = mi.taste_session(iter(range(5)), max_items=0)
+        candidate = session.candidate()
+        with self.assertRaises(mi.TasteBudgetExceeded):
+            next(candidate)
+        prefix, remainder = session.abandon()
+        self.assertEqual(prefix, [])
+        self.assertEqual(list(remainder), [0, 1, 2, 3, 4])
+
+    def test_invalid_budget(self):
+        with self.assertRaises(ValueError):
+            mi.taste_session(iter(range(3)), max_items=-1)
+
+    def test_exhausted_source_stops_candidate(self):
+        session = mi.taste_session(iter([1, 2]), max_items=5)
+        candidate = session.candidate()
+        self.assertEqual(list(candidate), [1, 2])
+        with self.assertRaises(StopIteration):
+            next(candidate)
+        self.assertEqual(session.items_read, 2)
+
+
 class InterleaveTests(TestCase):
     def test_even(self):
         actual = list(mi.interleave([1, 4, 7], [2, 5, 8], [3, 6, 9]))

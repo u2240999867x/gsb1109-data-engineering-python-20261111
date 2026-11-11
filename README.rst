@@ -31,7 +31,8 @@ Python iterables.
 +------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | Lookahead and lookback | `spy <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.spy>`_,                                                                                       |
 |                        | `peekable <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.peekable>`_,                                                                             |
-|                        | `seekable <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.seekable>`_                                                                              |
+|                        | `seekable <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.seekable>`_,                                                                             |
+|                        | `taste_session <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.taste_session>`_                                                                    |
 +------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | Windowing              | `windowed <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.windowed>`_,                                                                             |
 |                        | `substrings <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.substrings>`_,                                                                         |

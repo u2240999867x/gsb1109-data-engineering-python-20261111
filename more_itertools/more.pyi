@@ -34,6 +34,7 @@ from _typeshed import (
 __all__ = [
     'AbortThread',
     'SequenceView',
+    'TasteBudgetExceeded',
     'adjacent',
     'all_unique',
     'always_iterable',
@@ -142,6 +143,7 @@ __all__ = [
     'substrings_indexes',
     'synchronized',
     'takewhile_inclusive',
+    'taste_session',
     'time_limited',
     'unique_in_window',
     'unique_to_each',
@@ -269,6 +271,20 @@ class bucket(Generic[_T, _U], Container[_U]):
 def spy(
     iterable: Iterable[_T], n: int = ...
 ) -> tuple[list[_T], Iterator[_T]]: ...
+
+class TasteBudgetExceeded(Exception):
+    pass
+
+class taste_session(Generic[_T]):
+    def __init__(self, iterable: Iterable[_T], max_items: int) -> None: ...
+    def candidate(self) -> Iterator[_T]: ...
+    def commit(self, candidate: Iterator[_T]) -> Iterator[_T]: ...
+    def abandon(self) -> tuple[list[_T], Iterator[_T]]: ...
+    @property
+    def items_read(self) -> int: ...
+    @property
+    def remaining_budget(self) -> int: ...
+
 def interleave(*iterables: Iterable[_T]) -> Iterator[_T]: ...
 def interleave_longest(*iterables: Iterable[_T]) -> Iterator[_T]: ...
 def interleave_evenly(

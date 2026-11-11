@@ -61,6 +61,7 @@ from .recipes import (
 __all__ = [
     'AbortThread',
     'SequenceView',
+    'TasteBudgetExceeded',
     'adjacent',
     'all_unique',
     'always_iterable',
@@ -169,6 +170,7 @@ __all__ = [
     'substrings_indexes',
     'synchronized',
     'takewhile_inclusive',
+    'taste_session',
     'time_limited',
     'unique_in_window',
     'unique_to_each',
@@ -1294,6 +1296,180 @@ def spy(iterable, n=1):
     """
     p, q = tee(iterable)
     return take(n, q), p
+
+
+class TasteBudgetExceeded(Exception):
+    """Raised when a :class:`taste_session` would pull more items from its
+    source than its budget allows."""
+
+
+class taste_session:
+    """Coordinate bounded, independent "tasting" of one iterable.
+
+    A session wraps *iterable* and limits the total number of items that may
+    be pulled from it during the tasting phase to *max_items*. Hand out
+    candidates with :meth:`candidate`; each candidate is an iterator over the
+    same source, starting at the first item, and candidates advance
+    independently. Items already pulled for one candidate are replayed to the
+    others from a buffer, so the budget counts items pulled from the source,
+    not items yielded to candidates:
+
+        >>> session = taste_session(iter(range(6)), max_items=3)
+        >>> first = session.candidate()
+        >>> second = session.candidate()
+        >>> next(first), next(first)
+        (0, 1)
+        >>> next(second)
+        0
+        >>> session.items_read
+        2
+
+    Reading past the budget raises :class:`TasteBudgetExceeded` instead of
+    silently draining the source. The source is not advanced by the failed
+    read:
+
+        >>> next(first)
+        2
+        >>> next(first)  # doctest: +IGNORE_EXCEPTION_DETAIL
+        Traceback (most recent call last):
+        ...
+        TasteBudgetExceeded
+        >>> session.items_read
+        3
+
+    Once a candidate has won, pass it to :meth:`commit` to get the complete
+    input again, starting at the original first item. The other candidates,
+    and the committed candidate itself, are invalidated:
+
+        >>> winner = session.commit(second)
+        >>> list(winner)
+        [0, 1, 2, 3, 4, 5]
+        >>> next(second)  # doctest: +IGNORE_EXCEPTION_DETAIL
+        Traceback (most recent call last):
+        ...
+        ValueError
+
+    If every candidate fails, call :meth:`abandon` to recover the prefix read
+    so far and the untouched remainder of the source:
+
+        >>> session = taste_session(iter('abcde'), max_items=2)
+        >>> candidate = session.candidate()
+        >>> next(candidate), next(candidate)
+        ('a', 'b')
+        >>> prefix, remainder = session.abandon()
+        >>> prefix
+        ['a', 'b']
+        >>> list(remainder)
+        ['c', 'd', 'e']
+
+    """
+
+    def __init__(self, iterable, max_items):
+        if max_items < 0:
+            raise ValueError('max_items must be at least 0')
+        self._source = iter(iterable)
+        self._max_items = max_items
+        self._prefix = []
+        self._consumed = 0
+        self._state = 'active'
+        self._candidates = []
+
+    @property
+    def items_read(self):
+        """Number of items pulled from the source so far."""
+        return self._consumed
+
+    @property
+    def remaining_budget(self):
+        """Number of additional items that may still be pulled."""
+        return self._max_items - self._consumed
+
+    def candidate(self):
+        """Return a new candidate iterator over the source.
+
+        Candidates start at the original first item and advance independently
+        of each other.
+        """
+        self._require_active()
+        candidate = _TasteCandidate(self)
+        self._candidates.append(candidate)
+        return candidate
+
+    def commit(self, candidate):
+        """End the tasting phase with *candidate* as the winner.
+
+        Return an iterator over the complete input, starting at the original
+        first item, including items never reached during the tasting. All
+        candidate handles are invalidated.
+        """
+        self._require_active()
+        if not isinstance(candidate, _TasteCandidate) or (
+            candidate._session is not self
+        ):
+            raise ValueError(
+                'the given candidate does not belong to this taste session'
+            )
+        self._state = 'committed'
+        for member in self._candidates:
+            member._invalidate()
+        self._candidates.clear()
+        return chain(self._prefix, self._source)
+
+    def abandon(self):
+        """End the tasting phase without choosing a winner.
+
+        Return a 2-tuple of the items pulled from the source so far and an
+        iterator over the untouched remainder of the source. All candidate
+        handles are invalidated.
+        """
+        self._require_active()
+        self._state = 'abandoned'
+        for member in self._candidates:
+            member._invalidate()
+        self._candidates.clear()
+        return list(self._prefix), self._source
+
+    def _pull(self):
+        # Pull one item from the underlying source, enforcing the budget.
+        if self._consumed >= self._max_items:
+            raise TasteBudgetExceeded(
+                f'taste session budget of {self._max_items} item(s) is '
+                'exhausted'
+            )
+        item = next(self._source)
+        self._prefix.append(item)
+        self._consumed += 1
+        return item
+
+    def _require_active(self):
+        if self._state != 'active':
+            raise ValueError(
+                f'this taste session has already been {self._state}'
+            )
+
+
+class _TasteCandidate:
+    def __init__(self, session):
+        self._session = session
+        self._index = 0
+        self._active = True
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if not self._active:
+            raise ValueError('this taste candidate is no longer valid')
+        prefix = self._session._prefix
+        if self._index < len(prefix):
+            item = prefix[self._index]
+        else:
+            item = self._session._pull()
+        self._index += 1
+        return item
+
+    def _invalidate(self):
+        self._active = False
 
 
 def interleave(*iterables):
