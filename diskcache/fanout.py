@@ -2,6 +2,7 @@
 
 import contextlib as cl
 import functools
+import heapq
 import itertools as it
 import operator
 import os.path as op
@@ -439,6 +440,72 @@ class FanoutCache:
         """
         for shard in self._shards:
             shard.drop_tag_index()
+
+    def create_composite_index(self):
+        """Create composite index on every cache shard.
+
+        Better to initialize cache with `composite_index=True` than use this.
+
+        :raises IndexKeyError: if existing entries in a shard cannot be
+            indexed
+        :raises Timeout: if database timeout occurs
+
+        """
+        for shard in self._shards:
+            shard.create_composite_index()
+
+    def drop_composite_index(self):
+        """Drop composite index on every cache shard.
+
+        :raises Timeout: if database timeout occurs
+
+        """
+        for shard in self._shards:
+            shard.drop_composite_index()
+
+    def select(self, source, start=None, end=None, limit=None, read=False):
+        """Return items matching `source` within a business time range.
+
+        Each shard is queried through its composite index and the per-shard
+        ordered results are merged so the returned items stay ordered by
+        business time with ties broken by a stable key. Expired entries and
+        entries whose value file is missing are excluded.
+
+        :param source: value of the key ``source`` field
+        :param start: inclusive lower bound of ``business_time`` (default None)
+        :param end: inclusive upper bound of ``business_time`` (default None)
+        :param int limit: maximum number of items to return (default None)
+        :param bool read: if True, return file handles for values
+            (default False)
+        :return: list of (key, value) pairs
+        :raises IndexKeyError: if the composite index is not enabled
+
+        """
+        shard_results = [
+            shard.select(source, start, end, read=read)
+            for shard in self._shards
+        ]
+
+        def sort_key(item):
+            business_time = item[0]['business_time']
+
+            # Match SQLite: NULL sorts before every value. Keeping NULL and
+            # values in separate tuple shapes avoids comparing None with a
+            # number during the merge.
+            if business_time is None:
+                return (0,)
+
+            return (1, business_time)
+
+        # heapq.merge is stable: equal business times keep shard order and
+        # each shard already breaks ties by primary key, so the result is
+        # fully deterministic.
+        merged = heapq.merge(*shard_results, key=sort_key)
+
+        if limit is None:
+            return list(merged)
+
+        return list(it.islice(merged, limit))
 
     def evict(self, tag, retry=False):
         """Remove items with matching `tag` from cache.

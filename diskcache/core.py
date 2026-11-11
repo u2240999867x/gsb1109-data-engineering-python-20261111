@@ -19,6 +19,8 @@ import time
 import warnings
 import zlib
 
+from collections.abc import Mapping
+
 
 def full_name(func):
     """Return full name of `func` by adding the module and function name."""
@@ -48,6 +50,7 @@ MODE_PICKLE = 4
 DEFAULT_SETTINGS = {
     'statistics': 0,  # False
     'tag_index': 0,  # False
+    'composite_index': 0,  # False
     'eviction_policy': 'least-recently-stored',
     'size_limit': 2**30,  # 1gb
     'cull_limit': 10,
@@ -59,6 +62,10 @@ DEFAULT_SETTINGS = {
     'disk_min_file_size': 2**15,  # 32kb
     'disk_pickle_protocol': pickle.HIGHEST_PROTOCOL,
 }
+
+# Names of the Cache table columns backing the composite index. The composite
+# index key is the ordered pair (index_source, index_business_time).
+COMPOSITE_INDEX_COLUMNS = ('index_source', 'index_business_time')
 
 METADATA = {
     'count': 0,
@@ -376,6 +383,17 @@ class Timeout(Exception):
     """Database timeout expired."""
 
 
+class IndexKeyError(ValueError):
+    """Composite index key is malformed.
+
+    Raised when a key cannot supply the composite index fields, either because
+    it is not a mapping or because an index field is missing. Explicitly
+    storing ``None`` for a field is permitted and distinct from a missing
+    field.
+
+    """
+
+
 class UnknownFileWarning(UserWarning):
     """Warning used by Cache.check for unknown files."""
 
@@ -467,6 +485,7 @@ class Cache:
         sets = DEFAULT_SETTINGS.copy()
         sets.update(current_settings)
         sets.update(settings)
+        previous_composite_index = current_settings.get('composite_index', 0)
 
         for key in METADATA:
             sets.pop(key, None)
@@ -521,8 +540,21 @@ class Cache:
             ' size INTEGER DEFAULT 0,'
             ' mode INTEGER DEFAULT 0,'
             ' filename TEXT,'
-            ' value BLOB)'
+            ' value BLOB,'
+            ' index_source BLOB,'
+            ' index_business_time BLOB)'
         )
+
+        # Older databases predate the composite index columns. Add them
+        # in-place so existing entries can be inspected and backfilled.
+
+        cache_columns = {
+            row[1] for row in sql('PRAGMA table_info(Cache)').fetchall()
+        }
+
+        for column in COMPOSITE_INDEX_COLUMNS:
+            if column not in cache_columns:
+                sql('ALTER TABLE Cache ADD COLUMN %s BLOB' % column)
 
         sql(
             'CREATE UNIQUE INDEX IF NOT EXISTS Cache_key_raw ON'
@@ -583,6 +615,14 @@ class Cache:
             self.create_tag_index()
         else:
             self.drop_tag_index()
+
+        # Create composite index if requested. Enabling on an existing
+        # directory requires every entry to supply indexable fields.
+
+        if self.composite_index:  # pylint: disable=no-member
+            self.create_composite_index()
+        elif previous_composite_index:
+            self.drop_composite_index()
 
         # Close and re-open database connection with given timeout.
 
@@ -768,9 +808,18 @@ class Cache:
         """
         now = time.time()
         db_key, raw = self._disk.put(key)
+        index_values = self._composite_index_values(key)
         expire_time = None if expire is None else now + expire
         size, mode, filename, db_value = self._disk.store(value, read, key=key)
-        columns = (expire_time, tag, size, mode, filename, db_value)
+        columns = (
+            expire_time,
+            tag,
+            size,
+            mode,
+            filename,
+            db_value,
+            index_values,
+        )
 
         # The order of SELECT, UPDATE, and INSERT is important below.
         #
@@ -824,7 +873,18 @@ class Cache:
 
     def _row_update(self, rowid, now, columns):
         sql = self._sql
-        expire_time, tag, size, mode, filename, value = columns
+        (
+            expire_time,
+            tag,
+            size,
+            mode,
+            filename,
+            value,
+            index_values,
+        ) = columns
+        index_source, index_business_time = (
+            (None, None) if index_values is None else index_values
+        )
         sql(
             'UPDATE Cache SET'
             ' store_time = ?,'
@@ -835,7 +895,9 @@ class Cache:
             ' size = ?,'
             ' mode = ?,'
             ' filename = ?,'
-            ' value = ?'
+            ' value = ?,'
+            ' index_source = ?,'
+            ' index_business_time = ?'
             ' WHERE rowid = ?',
             (
                 now,  # store_time
@@ -847,18 +909,32 @@ class Cache:
                 mode,
                 filename,
                 value,
+                index_source,
+                index_business_time,
                 rowid,
             ),
         )
 
     def _row_insert(self, key, raw, now, columns):
         sql = self._sql
-        expire_time, tag, size, mode, filename, value = columns
+        (
+            expire_time,
+            tag,
+            size,
+            mode,
+            filename,
+            value,
+            index_values,
+        ) = columns
+        index_source, index_business_time = (
+            (None, None) if index_values is None else index_values
+        )
         sql(
             'INSERT INTO Cache('
             ' key, raw, store_time, expire_time, access_time,'
-            ' access_count, tag, size, mode, filename, value'
-            ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            ' access_count, tag, size, mode, filename, value,'
+            ' index_source, index_business_time'
+            ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 key,
                 raw,
@@ -871,6 +947,8 @@ class Cache:
                 mode,
                 filename,
                 value,
+                index_source,
+                index_business_time,
             ),
         )
 
@@ -988,9 +1066,18 @@ class Cache:
         """
         now = time.time()
         db_key, raw = self._disk.put(key)
+        index_values = self._composite_index_values(key)
         expire_time = None if expire is None else now + expire
         size, mode, filename, db_value = self._disk.store(value, read, key=key)
-        columns = (expire_time, tag, size, mode, filename, db_value)
+        columns = (
+            expire_time,
+            tag,
+            size,
+            mode,
+            filename,
+            db_value,
+            index_values,
+        )
 
         with self._transact(retry, filename) as (sql, cleanup):
             rows = sql(
@@ -1042,6 +1129,7 @@ class Cache:
         """
         now = time.time()
         db_key, raw = self._disk.put(key)
+        index_values = self._composite_index_values(key)
         select = (
             'SELECT rowid, expire_time, filename, value FROM Cache'
             ' WHERE key = ? AND raw = ?'
@@ -1055,8 +1143,10 @@ class Cache:
                     raise KeyError(key)
 
                 value = default + delta
-                columns = (None, None) + self._disk.store(
-                    value, False, key=key
+                columns = (
+                    (None, None)
+                    + self._disk.store(value, False, key=key)
+                    + (index_values,)
                 )
                 self._row_insert(db_key, raw, now, columns)
                 self._cull(now, sql, cleanup)
@@ -1069,8 +1159,10 @@ class Cache:
                     raise KeyError(key)
 
                 value = default + delta
-                columns = (None, None) + self._disk.store(
-                    value, False, key=key
+                columns = (
+                    (None, None)
+                    + self._disk.store(value, False, key=key)
+                    + (index_values,)
                 )
                 self._row_update(rowid, now, columns)
                 self._cull(now, sql, cleanup)
@@ -1445,9 +1537,20 @@ class Cache:
 
         now = time.time()
         raw = True
+        # Queue keys are integers or prefixed strings, never mappings, so
+        # they never carry composite index fields.
+        index_values = None
         expire_time = None if expire is None else now + expire
         size, mode, filename, db_value = self._disk.store(value, read)
-        columns = (expire_time, tag, size, mode, filename, db_value)
+        columns = (
+            expire_time,
+            tag,
+            size,
+            mode,
+            filename,
+            db_value,
+            index_values,
+        )
         order = {'back': 'DESC', 'front': 'ASC'}
         select = (
             'SELECT key FROM Cache'
@@ -2043,6 +2146,340 @@ class Cache:
         sql = self._sql
         sql('DROP INDEX IF EXISTS Cache_tag_rowid')
         self.reset('tag_index', 0)
+
+    @staticmethod
+    def _composite_index_fields(key):
+        """Extract the composite index fields from `key`.
+
+        Only mapping keys are indexable. A missing field is an error while an
+        explicit ``None`` is a stored value, so the two cases are kept apart.
+
+        :param key: key for item
+        :return: (source, business_time) pair
+        :raises IndexKeyError: if `key` is not a mapping or a field is missing
+
+        """
+        if not isinstance(key, Mapping):
+            raise IndexKeyError(
+                'composite index requires mapping key, got %r' % (key,)
+            )
+
+        try:
+            source = key['source']
+        except KeyError:
+            raise IndexKeyError(
+                'composite index key is missing field %r' % ('source',)
+            ) from None
+
+        try:
+            business_time = key['business_time']
+        except KeyError:
+            raise IndexKeyError(
+                'composite index key is missing field %r'
+                % ('business_time',)
+            ) from None
+
+        return source, business_time
+
+    def _composite_index_values(self, key):
+        """Return database values for the composite index columns.
+
+        Explicit ``None`` is stored as SQL NULL so it stays distinct from a
+        missing field, which raises :class:`IndexKeyError`.
+
+        :param key: key for item
+        :return: (index_source, index_business_time) pair or None when the
+            composite index is disabled
+
+        """
+        if not self.composite_index:  # pylint: disable=no-member
+            return None
+
+        source, business_time = self._composite_index_fields(key)
+        db_source = None if source is None else self._disk.put(source)[0]
+        db_business_time = (
+            None if business_time is None else self._disk.put(business_time)[0]
+        )
+        return db_source, db_business_time
+
+    def create_composite_index(self):
+        """Create composite index on cache database.
+
+        The index keys entries by the ``source`` and ``business_time`` fields
+        of mapping keys. It is better to initialize the cache with
+        `composite_index=True` than use this.
+
+        Every existing entry must use an indexable mapping key. Entries that
+        cannot be indexed are reported through :class:`IndexKeyError` instead
+        of being silently skipped.
+
+        :raises IndexKeyError: if existing entries cannot be indexed
+        :raises Timeout: if database timeout occurs
+
+        """
+        sql = self._sql
+
+        rows = sql('SELECT rowid, key, raw FROM Cache').fetchall()
+        updates = []
+        unindexable = []
+
+        # Inspect every entry before writing anything so a failure leaves the
+        # table untouched rather than partially backfilled.
+        for rowid, db_key, raw in rows:
+            key = self._disk.get(db_key, raw)
+            try:
+                source, business_time = self._composite_index_fields(key)
+            except IndexKeyError as error:
+                unindexable.append((rowid, key, error))
+                continue
+
+            db_source = (
+                None if source is None else self._disk.put(source)[0]
+            )
+            db_business_time = (
+                None
+                if business_time is None
+                else self._disk.put(business_time)[0]
+            )
+            updates.append((rowid, db_source, db_business_time))
+
+        if unindexable:
+            # The constructor may have persisted the requested setting before
+            # the build ran. Roll it back so reopening the directory does not
+            # keep failing on the same unindexable entries.
+            self.reset('composite_index', 0)
+            details = ', '.join(
+                'rowid %d key %r: %s' % (rowid, key, error)
+                for rowid, key, error in unindexable
+            )
+            raise IndexKeyError(
+                '%d existing entr%s cannot be indexed: %s'
+                % (
+                    len(unindexable),
+                    'y' if len(unindexable) == 1 else 'ies',
+                    details,
+                )
+            )
+
+        for rowid, db_source, db_business_time in updates:
+            sql(
+                'UPDATE Cache SET index_source = ?,'
+                ' index_business_time = ? WHERE rowid = ?',
+                (db_source, db_business_time, rowid),
+            )
+
+        sql(
+            'CREATE INDEX IF NOT EXISTS Cache_composite ON'
+            ' Cache(index_source, index_business_time, rowid)'
+        )
+        self.reset('composite_index', 1)
+
+    def drop_composite_index(self):
+        """Drop composite index on cache database.
+
+        Index column values are cleared so a later re-enabling starts from a
+        clean state and stale entries cannot appear indexable.
+
+        :raises Timeout: if database timeout occurs
+
+        """
+        sql = self._sql
+        sql('DROP INDEX IF EXISTS Cache_composite')
+        sql(
+            'UPDATE Cache SET index_source = NULL,'
+            ' index_business_time = NULL'
+        )
+        self.reset('composite_index', 0)
+
+    def _index_entry_valid(self, expire_time, filename, now):
+        """Return True when an index row still points at a valid entry.
+
+        A row remaining in the index is not by itself proof of validity.
+        Expired entries and rows whose value file is gone are treated as
+        stale so callers never treat a lingering index entry as a valid
+        result.
+
+        :param float expire_time: row expiration timestamp or None
+        :param str filename: row value file or None
+        :param float now: current timestamp
+        :return: True when the entry may be returned
+
+        """
+        if expire_time is not None and expire_time <= now:
+            return False
+
+        if filename is not None and not op.exists(
+            op.join(self._directory, filename)
+        ):
+            return False
+
+        return True
+
+    def select(
+        self,
+        source,
+        start=None,
+        end=None,
+        limit=None,
+        read=False,
+    ):
+        """Return items matching `source` within a business time range.
+
+        Lookup uses the composite index declared through
+        `composite_index=True` or :meth:`create_composite_index`. Rows are
+        ordered by business time and ties are broken by the stable primary
+        key (rowid).
+
+        The range is closed: both `start` and `end` are included. Either bound
+        may be omitted to leave that side of the range open.
+
+        Index membership alone does not make a result valid: expired entries
+        and entries whose value file is missing are checked and excluded.
+
+        :param source: value of the key ``source`` field
+        :param start: inclusive lower bound of ``business_time`` (default None)
+        :param end: inclusive upper bound of ``business_time`` (default None)
+        :param int limit: maximum number of items to return (default None)
+        :param bool read: if True, return file handles for values
+            (default False)
+        :return: list of (key, value) pairs ordered by business time, rowid
+        :raises IndexKeyError: if the composite index is not enabled
+
+        """
+        if not self.composite_index:  # pylint: disable=no-member
+            raise IndexKeyError('composite index is not enabled')
+
+        if source is None:
+            where = ['index_source IS NULL']
+            args = []
+        else:
+            db_source, _ = self._disk.put(source)
+            where = ['index_source = ?']
+            args = [db_source]
+
+        if start is not None:
+            db_start, _ = self._disk.put(start)
+            where.append('index_business_time >= ?')
+            args.append(db_start)
+
+        if end is not None:
+            db_end, _ = self._disk.put(end)
+            where.append('index_business_time <= ?')
+            args.append(db_end)
+
+        columns = (
+            'rowid, key, raw, expire_time, index_business_time,'
+            ' mode, filename, value'
+        )
+        order = ' ORDER BY index_business_time ASC, rowid ASC'
+        base_query = 'SELECT %s FROM Cache WHERE %s' % (
+            columns,
+            ' AND '.join(where),
+        )
+        now = time.time()
+
+        if limit is None:
+            rows = self._sql(base_query + order, tuple(args)).fetchall()
+            return self._select_results(rows, now, read)
+
+        # Page through the index so a page full of stale rows cannot starve
+        # the result. The cursor compares business time with null-safe IS so
+        # entries whose explicit business time is NULL page correctly.
+        batch_size = limit
+        cursor = None
+        results = []
+
+        while True:
+            query = base_query
+            query_args = list(args)
+
+            if cursor is not None:
+                business_time, last_rowid = cursor
+
+                if business_time is None:
+                    # NULL sorts first; after the NULL group, advance into
+                    # every non-NULL business time.
+                    query += (
+                        ' AND (index_business_time IS NOT NULL OR'
+                        ' (index_business_time IS NULL AND rowid > ?))'
+                    )
+                    query_args.append(last_rowid)
+                else:
+                    query += (
+                        ' AND (index_business_time > ? OR'
+                        ' (index_business_time IS ? AND rowid > ?))'
+                    )
+                    query_args.extend(
+                        (business_time, business_time, last_rowid)
+                    )
+
+            rows = self._sql(
+                query + order + ' LIMIT ?',
+                tuple(query_args) + (batch_size,),
+            ).fetchall()
+
+            if not rows:
+                break
+
+            for row in rows:
+                (
+                    rowid,
+                    db_key,
+                    raw,
+                    expire_time,
+                    business_time,
+                    mode,
+                    filename,
+                    value,
+                ) = row
+                cursor = (business_time, rowid)
+
+                if not self._index_entry_valid(expire_time, filename, now):
+                    continue
+
+                key = self._disk.get(db_key, raw)
+
+                try:
+                    fetched = self._disk.fetch(mode, filename, value, read)
+                except IOError:
+                    # Value file disappeared before the row could be fetched.
+                    continue
+
+                results.append((key, fetched))
+
+                if len(results) == limit:
+                    return results
+
+        return results
+
+    def _select_results(self, rows, now, read):
+        """Deserialize index lookup rows, dropping stale entries."""
+        results = []
+
+        for (
+            rowid,
+            db_key,
+            raw,
+            expire_time,
+            _business_time,
+            mode,
+            filename,
+            value,
+        ) in rows:
+            if not self._index_entry_valid(expire_time, filename, now):
+                continue
+
+            key = self._disk.get(db_key, raw)
+
+            try:
+                fetched = self._disk.fetch(mode, filename, value, read)
+            except IOError:
+                # Value file disappeared before the row could be fetched.
+                continue
+
+            results.append((key, fetched))
+
+        return results
 
     def evict(self, tag, retry=False):
         """Remove items with matching `tag` from cache.

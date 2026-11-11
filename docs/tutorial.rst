@@ -259,6 +259,82 @@ Likewise, the tag index may be created or dropped using methods::
 But prefer initializing the cache with a tag index rather than explicitly
 creating or dropping the tag index.
 
+.. _tutorial-composite-index:
+
+Composite Index
+...............
+
+The primary key of a cache entry is arbitrary. A common pattern is to key
+events by an identifier while back-filling data needs to look up a range of
+entries by their origin and business time. The composite index supports that
+pattern by additionally indexing mapping keys on their ``source`` and
+``business_time`` fields. Enable it by initializing the cache with
+``composite_index=True``.
+
+    >>> indexed = Cache(composite_index=True)
+    >>> keys = [
+    ...     {'source': 'binlog', 'business_time': '2026-11-01', 'event_id': 1},
+    ...     {'source': 'binlog', 'business_time': '2026-11-01', 'event_id': 2},
+    ...     {'source': 'binlog', 'business_time': '2026-11-02', 'event_id': 3},
+    ... ]
+    >>> for num, key in enumerate(keys):
+    ...     _ = indexed.set(key, 'value-%d' % num)
+
+:meth:`Select <diskcache.Cache.select>` returns the matching ``(key, value)``
+pairs ordered by business time. Entries sharing a business time are ordered by
+their stable primary key so repeated calls return the same sequence.
+
+    >>> [value for _, value in indexed.select('binlog')]
+    ['value-0', 'value-1', 'value-2']
+    >>> [value for _, value in indexed.select('binlog', start='2026-11-02')]
+    ['value-2']
+    >>> [value for _, value in indexed.select('binlog', limit=1)]
+    ['value-0']
+
+Both range bounds are inclusive and either may be omitted. The index is kept
+in sync when entries are updated or removed, so lookups never return stale
+entries and expired entries are excluded even while their index row lingers.
+
+Only mapping keys that supply both fields can be indexed. A missing field is
+an error while an explicit ``None`` is permitted and stored as SQL NULL:
+
+    >>> indexed.set({'source': 'binlog'}, 'bad')
+    Traceback (most recent call last):
+        ...
+    diskcache.core.IndexKeyError: composite index key is missing field 'business_time'
+    >>> _ = indexed.set(
+    ...     {'source': None, 'business_time': None, 'event_id': 4}, 'none'
+    ... )
+    >>> [value for _, value in indexed.select(None)]
+    ['none']
+
+Enabling the index on an existing directory inspects every entry first.
+Entries that cannot be indexed are reported through
+:class:`~diskcache.IndexKeyError` instead of being silently skipped, and the
+cache keeps working with the index disabled.
+
+    >>> legacy = Cache()
+    >>> legacy.set('plain-key', 1)
+    True
+    >>> legacy.create_composite_index()
+    Traceback (most recent call last):
+        ...
+    diskcache.core.IndexKeyError: 1 existing entry cannot be indexed: ...
+    >>> legacy.composite_index
+    0
+    >>> legacy.close()
+
+As with the tag index, the composite index may be created or dropped
+explicitly, but prefer initializing the cache with the index enabled.
+
+    >>> indexed.drop_composite_index()
+    >>> indexed.composite_index
+    0
+    >>> indexed.create_composite_index()
+    >>> indexed.composite_index
+    1
+    >>> indexed.close()
+
 To manually enforce the cache's size limit, use the :meth:`cull
 <diskcache.Cache.cull>` method. :meth:`Cull <diskcache.Cache.cull>` begins by
 removing expired items from the cache and then uses the eviction policy to
@@ -707,6 +783,10 @@ during initialization when passed as keyword arguments.
 * `tag_index`, default False, disabled. The setting to create a database
   :ref:`tag index <tutorial-tag-index>` for :meth:`evict
   <diskcache.Cache.evict>`.
+* `composite_index`, default False, disabled. The setting to create a database
+  :ref:`composite index <tutorial-composite-index>` on the ``source`` and
+  ``business_time`` fields of mapping keys for :meth:`select
+  <diskcache.Cache.select>`.
 * `eviction_policy`, default "least-recently-stored". The setting to determine
   :ref:`eviction policy <tutorial-eviction-policies>`.
 

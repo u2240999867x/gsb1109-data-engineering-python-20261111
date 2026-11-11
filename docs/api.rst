@@ -80,6 +80,9 @@ Read the :ref:`Settings tutorial <tutorial-settings>` for details.
 
    * `statistics` (int) default 0 - disabled when 0, enabled when 1.
    * `tag_index` (int) default 0 - disabled when 0, enabled when 1.
+   * `composite_index` (int) default 0 - disabled when 0, enabled when 1.
+     When enabled, mapping keys are indexed by their ``source`` and
+     ``business_time`` fields for range lookups via `Cache.select`.
    * `eviction_policy` (str) default "least-recently-stored" - any of the keys
      in `EVICTION_POLICY` as described below.
    * `size_limit` (int, in bytes) default one gigabyte - approximate size limit
@@ -130,3 +133,8 @@ Timeout
 -------
 
 .. autoexception:: diskcache.Timeout
+
+IndexKeyError
+-------------
+
+.. autoexception:: diskcache.IndexKeyError
