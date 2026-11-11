@@ -13,6 +13,7 @@ _(unreleased)_
 - Added `start` and `stop` support to [`listutils.BarrelList.index`][listutils.BarrelList.index] ([#592](https://github.com/mahmoud/boltons/pull/592))
 - Added timezone suffix support (`Z`, `+HH:MM`, `-HHMM`, optional seconds) to [`timeutils.isoparse`][timeutils.isoparse], returning aware datetimes so aware `isoformat()` output round-trips ([#594](https://github.com/mahmoud/boltons/pull/594))
 - Added keyword-only support to [`funcutils.wraps`][funcutils.wraps] `expected` via `(name, default, kwonly)` triples ([#522](https://github.com/mahmoud/boltons/pull/522))
+- Added signature-normalized cache keys to [`cacheutils.cached`][cacheutils.cached] and [`cacheutils.cachedmethod`][cacheutils.cachedmethod] via an optional `converters` mapping, backed by [`cacheutils.SignatureCacheKeyBuilder`][cacheutils.SignatureCacheKeyBuilder], so positional, keyword, and default-omitted calls with equal arguments share one entry; arguments without a stable representation raise [`cacheutils.UncacheableArgumentError`][cacheutils.UncacheableArgumentError] and bypass the cache instead of being keyed by `repr()` or object identity
 - Added [`iterutils.chunked_filter`][iterutils.chunked_filter], which filters an iterable in batches, calling the predicate once per batch ([#491](https://github.com/mahmoud/boltons/pull/491))
 - Fixed [`listutils.BarrelList`][listutils.BarrelList] pickling and `copy.copy`/`copy.deepcopy` (hang/duplication) by adding `__reduce__` ([#596](https://github.com/mahmoud/boltons/pull/596))
 - Fixed [`listutils.BarrelList`][listutils.BarrelList] rich comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`) comparing empty base-list storage instead of contents ([#544](https://github.com/mahmoud/boltons/pull/544))
@@ -1232,6 +1233,8 @@ added in this release.
 [cacheutils.cached]: http://boltons.readthedocs.org/en/latest/cacheutils.html#boltons.cacheutils.cached
 [cacheutils.cachedmethod]: http://boltons.readthedocs.org/en/latest/cacheutils.html#boltons.cacheutils.cachedmethod
 [cacheutils.cachedproperty]: http://boltons.readthedocs.org/en/latest/cacheutils.html#boltons.cacheutils.cachedproperty
+[cacheutils.SignatureCacheKeyBuilder]: http://boltons.readthedocs.org/en/latest/cacheutils.html#boltons.cacheutils.SignatureCacheKeyBuilder
+[cacheutils.UncacheableArgumentError]: http://boltons.readthedocs.org/en/latest/cacheutils.html#boltons.cacheutils.UncacheableArgumentError
 [debugutils.pdb_on_signal]: http://boltons.readthedocs.org/en/latest/debugutils.html#boltons.debugutils.pdb_on_signal
 [dictutils]: http://boltons.readthedocs.org/en/latest/dictutils.html
 [dictutils.OMD]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.OMD

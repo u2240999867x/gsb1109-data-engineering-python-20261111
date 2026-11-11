@@ -64,6 +64,7 @@ Learn more about `caching algorithms on Wikipedia
 
 
 import heapq
+import inspect
 import math
 import weakref
 import itertools
@@ -84,9 +85,15 @@ try:
     from .typeutils import make_sentinel
     _MISSING = make_sentinel(var_name='_MISSING')
     _KWARG_MARK = make_sentinel(var_name='_KWARG_MARK')
+    _FUNC_MARK = make_sentinel(var_name='_FUNC_MARK')
+    _VARARGS_MARK = make_sentinel(var_name='_VARARGS_MARK')
+    _TYPES_MARK = make_sentinel(var_name='_TYPES_MARK')
 except ImportError:
     _MISSING = object()
     _KWARG_MARK = object()
+    _FUNC_MARK = object()
+    _VARARGS_MARK = object()
+    _TYPES_MARK = object()
 
 PREV, NEXT, KEY, VALUE = range(4)   # names for the link fields
 DEFAULT_MAX_SIZE = 128
@@ -436,11 +443,297 @@ def make_cache_key(args, kwargs, typed=False,
 _make_cache_key = make_cache_key
 
 
+class UncacheableArgumentError(TypeError):
+    """Raised by :class:`SignatureCacheKeyBuilder` when a call contains an
+    argument that has no stable, hashable representation.
+
+    The wrapped call is not cached in that case: the underlying function is
+    still executed normally, without ``repr()``, object identity, or a memory
+    address being used to fabricate a key.
+    """
+
+
+# mutable or unordered containers that compare by contents and are therefore
+# normalized structurally; each element goes through the same rules, so the
+# caller's registered converters apply inside containers as well
+_STRUCTURAL_CONTAINER_TYPES = (list, tuple, frozenset, set, dict)
+
+
+class _BoundInstance:
+    """Explicit identity scope for the bound object of a cached method.
+
+    Instances of classes that rely on :func:`object` identity (no custom
+    ``__eq__``/``__hash__``) are otherwise rejected by signature
+    normalization. A cached method intentionally scopes entries per bound
+    instance, exactly like :func:`cachedmethod`'s default keys, so the
+    instance is wrapped rather than silently hashed as a plain argument.
+    """
+    __slots__ = ('obj',)
+
+    def __init__(self, obj):
+        self.obj = obj
+
+    def __hash__(self):
+        return hash(self.obj)
+
+    def __eq__(self, other):
+        return (isinstance(other, _BoundInstance)
+                and self.obj is other.obj)
+
+    def __repr__(self):
+        return '<bound instance %r>' % (self.obj,)
+
+
+def _has_value_semantics(value_type):
+    # Identity-only types keep object.__eq__/object.__hash__, meaning their
+    # hash is effectively an address and equality is "same object". Those
+    # cannot express a stable cross-call key, so they are rejected unless a
+    # converter was registered. Types that define their own equality
+    # (numbers, strings, tuples, enums, datetimes, value objects...) are fine.
+    return (value_type.__hash__ is not object.__hash__
+            or value_type.__eq__ is not object.__eq__)
+
+
+class SignatureCacheKeyBuilder:
+    """Build cache keys normalized against a function's signature.
+
+    Unlike :func:`make_cache_key`, which treats positional and keyword
+    arguments as structurally different, this builder binds the call
+    arguments through :func:`inspect.signature` first. As a result, the same
+    logical call produces the same key whether an argument is passed
+    positionally, by keyword, or left at its default.
+
+    Args:
+        func (callable): The wrapped function or method. Its signature is
+            used to bind arguments, so bound methods and explicit
+            ``self`` arguments normalize identically. Built-in callables
+            without an inspectable signature are not supported.
+        converters (dict): Optional mapping of types to callables turning
+            values of that exact type into stable, hashable key data. The
+            callable receives the value and must return a hashable object
+            (typically a :class:`tuple` of primitives). This is how callers
+            declare the representation of :class:`list`, :class:`dict`, and
+            other values. Subtypes are not matched implicitly; register them
+            explicitly.
+        typed (bool): Whether argument types factor into the key. Defaults
+            to ``False``, like :func:`make_cache_key`, so ``3`` and ``3.0``
+            compare equal. Container kinds are always tagged regardless, so
+            a :class:`tuple` and a :class:`list` with equal contents never
+            share a key.
+        scoped (bool): Whether the wrapped function itself is part of the
+            key. Defaults to ``True``, keeping different functions sharing a
+            cache from reading one another's entries.
+
+    Normalization rules for each bound argument, in order:
+
+      1. A converter registered for the value's exact type is used.
+      2. Lists, tuples, sets, frozensets, and dicts are normalized
+         structurally, with kind markers and recursively normalized
+         contents, so order and nesting never collapse distinct calls.
+      3. Natively hashable types with value-based equality are used
+         directly. Types whose only distinction is object identity
+         (plain instances retaining :func:`object` equality/hashing) are
+         rejected, because their hash is effectively a memory address.
+      4. Anything else raises :class:`UncacheableArgumentError`. No
+         :func:`repr` fallback, no synthesized identifiers.
+
+    When *bind_first* is set, as used by :func:`cachedmethod`, the first
+    parameter is the bound instance and receives identity scoping instead
+    of rule 3, keeping per-instance cache entries distinct while allowing
+    bound and unbound calls to share them.
+
+    >>> def clean(text, strip=True):
+    ...     return text.strip() if strip else text
+    ...
+    >>> builder = SignatureCacheKeyBuilder(clean)
+    >>> k1 = builder.make_key(('  hi ',), {})
+    >>> k2 = builder.make_key((), {'text': '  hi '})
+    >>> k3 = builder.make_key(('  hi ', True), {})
+    >>> k1 == k2 == k3
+    True
+    """
+
+    def __init__(self, func, converters=None, typed=False, scoped=True,
+                 bind_first=False):
+        self.func = func
+        try:
+            self.signature = inspect.signature(func)
+        except (TypeError, ValueError) as e:
+            raise TypeError('cannot normalize cache keys for %r: %s'
+                            % (func, e))
+        self.typed = typed
+        self.scoped = scoped
+        self.bind_first = bind_first
+        self._first_name = None
+        self._varargs_name = None
+        if bind_first:
+            for param in self.signature.parameters.values():
+                if param.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                                  inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                    self._first_name = param.name
+                    break
+                if param.kind is inspect.Parameter.VAR_POSITIONAL:
+                    # methods written as def m(*args) keep self here
+                    self._varargs_name = param.name
+                    break
+        self.converters = {}
+        if converters:
+            for typ, converter in converters.items():
+                if not isinstance(typ, type):
+                    raise TypeError('expected converter keys to be types,'
+                                    ' not %r' % (typ,))
+                if not callable(converter):
+                    raise TypeError('expected converter for %r to be callable,'
+                                    ' not %r' % (typ, converter))
+                self.converters[typ] = converter
+
+    def make_key(self, args, kwargs):
+        """Return the normalized, hashable cache key for one call.
+
+        *args* and *kwargs* must bind against the wrapped function's
+        signature; for methods, include the bound instance as the first
+        positional argument. Raises :class:`UncacheableArgumentError` if any
+        argument lacks a stable representation.
+        """
+        bound = self.signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        arguments = bound.arguments
+
+        key = []
+        if self.scoped:
+            key.append((_FUNC_MARK, self.func))
+
+        parameters = self.signature.parameters
+        # identity-based cycle guard for self-referential containers
+        seen_ids = set()
+        for name, param in parameters.items():
+            if name not in arguments:
+                continue
+            value = arguments[name]
+            kind = param.kind
+            if kind is inspect.Parameter.VAR_POSITIONAL:
+                if name == self._varargs_name and value:
+                    # def m(*args) style: the first vararg is the bound
+                    # instance, the rest are ordinary arguments
+                    normalized = (self._normalize_bound_instance(value[0]),) \
+                        + tuple(self._normalize_value(item, seen_ids)
+                                for item in value[1:])
+                else:
+                    normalized = tuple(self._normalize_value(item, seen_ids)
+                                       for item in value)
+                entry = (_VARARGS_MARK, name, normalized)
+            elif kind is inspect.Parameter.VAR_KEYWORD:
+                entry = (_KWARG_MARK, name,
+                         frozenset((key_name,
+                                    self._normalize_value(key_value, seen_ids))
+                                   for key_name, key_value in value.items()))
+            elif name == self._first_name:
+                entry = (name, self._normalize_bound_instance(value))
+            else:
+                entry = (name, self._normalize_value(value, seen_ids))
+            key.append(entry)
+
+        if self.typed:
+            type_tags = []
+            for name, param in parameters.items():
+                if name not in arguments:
+                    continue
+                value = arguments[name]
+                if param.kind is inspect.Parameter.VAR_POSITIONAL:
+                    tag = tuple(type(item) for item in value)
+                elif param.kind is inspect.Parameter.VAR_KEYWORD:
+                    tag = tuple(type(item) for item in value.values())
+                else:
+                    tag = type(value)
+                type_tags.append((name, tag))
+            key.append((_TYPES_MARK, tuple(type_tags)))
+
+        return _HashedKey(key)
+
+    def _normalize_bound_instance(self, value):
+        try:
+            hash(value)
+        except TypeError:
+            raise UncacheableArgumentError(
+                'bound instance %r of type %r is not hashable and cannot be'
+                ' used as a cache scope' % (value, type(value)))
+        return _BoundInstance(value)
+
+    def _normalize_value(self, value, seen_ids=None):
+        value_type = type(value)
+        converter = self.converters.get(value_type)
+        if converter is not None:
+            converted = converter(value)
+            try:
+                hash(converted)
+            except TypeError:
+                raise UncacheableArgumentError(
+                    'converter registered for %r returned unhashable value'
+                    ' %r' % (value_type, converted))
+            return converted
+        if isinstance(value, _STRUCTURAL_CONTAINER_TYPES):
+            return self._normalize_container(value, value_type, seen_ids)
+        try:
+            hash(value)
+        except TypeError:
+            raise UncacheableArgumentError(
+                'no stable key representation registered for value of type'
+                ' %r; register a converter or do not pass this value to a'
+                ' signature-normalized cached function' % (value_type,))
+        if not _has_value_semantics(value_type):
+            raise UncacheableArgumentError(
+                'value of type %r is only distinguishable by object identity;'
+                ' register a converter declaring its stable representation'
+                ' instead of caching it by memory address' % (value_type,))
+        return value
+
+    def _normalize_container(self, value, value_type, seen_ids=None):
+        value_id = id(value)
+        if seen_ids is not None:
+            if value_id in seen_ids:
+                raise UncacheableArgumentError(
+                    'cyclic container argument cannot be represented as a'
+                    ' stable cache key')
+            seen_ids.add(value_id)
+        try:
+            if value_type is dict:
+                content = frozenset((self._normalize_value(key, seen_ids),
+                                     self._normalize_value(item, seen_ids))
+                                    for key, item in value.items())
+            elif value_type in (set, frozenset):
+                content = frozenset(self._normalize_value(item, seen_ids)
+                                    for item in value)
+            else:
+                content = tuple(self._normalize_value(item, seen_ids)
+                                for item in value)
+        finally:
+            if seen_ids is not None:
+                seen_ids.discard(value_id)
+        return (value_type, content)
+
+
+def make_signature_cache_key(func, args, kwargs, converters=None,
+                             typed=False, scoped=True, bind_first=False):
+    """Functional wrapper around :class:`SignatureCacheKeyBuilder`.
+
+    Builds a signature-normalized key for *func* called with *args* and
+    *kwargs*, raising :class:`UncacheableArgumentError` for any argument
+    without a stable representation. Prefer reusing a single
+    :class:`SignatureCacheKeyBuilder` instance when wrapping a hot function,
+    as it keeps the inspected signature handy.
+    """
+    builder = SignatureCacheKeyBuilder(func, converters=converters,
+                                       typed=typed, scoped=scoped,
+                                       bind_first=bind_first)
+    return builder.make_key(args, kwargs)
+
+
 class CachedFunction:
     """This type is used by :func:`cached`, below. Instances of this
     class are used to wrap functions in caching logic.
     """
-    def __init__(self, func, cache, scoped=True, typed=False, key=None):
+    def __init__(self, func, cache, scoped=True, typed=False, key=None,
+                 converters=None):
         self.func = func
         if callable(cache):
             self.get_cache = cache
@@ -455,12 +748,30 @@ class CachedFunction:
             self.get_cache = _get_cache
         self.scoped = scoped
         self.typed = typed
-        self.key_func = key or make_cache_key
+        if converters is not None:
+            if key is not None:
+                raise TypeError('pass either key or converters, not both;'
+                                ' converters enable signature-normalized'
+                                ' cache keys')
+            self.key_func = None
+            self.key_builder = SignatureCacheKeyBuilder(
+                func, converters=converters, typed=typed, scoped=scoped)
+        else:
+            self.key_func = key or make_cache_key
+            self.key_builder = None
 
     def __call__(self, *args, **kwargs):
         cache = self.get_cache()
-        key_args = (self.func,) + args if self.scoped else args
-        key = self.key_func(key_args, kwargs, typed=self.typed)
+        if self.key_builder is not None:
+            try:
+                key = self.key_builder.make_key(args, kwargs)
+            except UncacheableArgumentError:
+                # no stable key: execute without touching the cache, so an
+                # unstable argument can never poison or collide in it
+                return self.func(*args, **kwargs)
+        else:
+            key_args = (self.func,) + args if self.scoped else args
+            key = self.key_func(key_args, kwargs, typed=self.typed)
         try:
             ret = cache[key]
         except KeyError:
@@ -469,6 +780,9 @@ class CachedFunction:
 
     def __repr__(self):
         cn = self.__class__.__name__
+        if self.key_builder is not None:
+            return ('%s(func=%r, converters=%r, typed=%r)'
+                    % (cn, self.func, self.key_builder.converters, self.typed))
         if self.typed or not self.scoped:
             return ("%s(func=%r, scoped=%r, typed=%r)"
                     % (cn, self.func, self.scoped, self.typed))
@@ -479,7 +793,8 @@ class CachedMethod:
     """Similar to :class:`CachedFunction`, this type is used by
     :func:`cachedmethod` to wrap methods in caching logic.
     """
-    def __init__(self, func, cache, scoped=True, typed=False, key=None):
+    def __init__(self, func, cache, scoped=True, typed=False, key=None,
+                 converters=None, _key_builder=None):
         self.func = func
         self.__isabstractmethod__ = getattr(func, '__isabstractmethod__', False)
         if isinstance(cache, str):
@@ -497,15 +812,41 @@ class CachedMethod:
             self.get_cache = _get_cache
         self.scoped = scoped
         self.typed = typed
-        self.key_func = key or make_cache_key
+        if _key_builder is not None:
+            # bound copy reusing the descriptor's inspected signature
+            self.key_func = None
+            self.key_builder = _key_builder
+        elif converters is not None:
+            if key is not None:
+                raise TypeError('pass either key or converters, not both;'
+                                ' converters enable signature-normalized'
+                                ' cache keys')
+            self.key_func = None
+            # bind against the unbound function; the bound instance is passed
+            # as the first positional argument in __call__, so bound and
+            # unbound invocations normalize through the same signature. The
+            # first parameter gets identity scoping rather than value
+            # normalization, since instances are typically identity objects.
+            self.key_builder = SignatureCacheKeyBuilder(
+                func, converters=converters, typed=typed, scoped=scoped,
+                bind_first=True)
+        else:
+            self.key_func = key or make_cache_key
+            self.key_builder = None
+        self.converters = converters
         self.bound_to = None
 
     def __get__(self, obj, objtype=None):
         if obj is None:
             return self
         cls = self.__class__
-        ret = cls(self.func, self.get_cache, typed=self.typed,
-                  scoped=self.scoped, key=self.key_func)
+        if self.key_builder is not None:
+            ret = cls(self.func, self.get_cache, typed=self.typed,
+                      scoped=self.scoped, converters=self.converters,
+                      _key_builder=self.key_builder)
+        else:
+            ret = cls(self.func, self.get_cache, typed=self.typed,
+                      scoped=self.scoped, key=self.key_func)
         ret.bound_to = obj
         return ret
 
@@ -515,8 +856,14 @@ class CachedMethod:
         else:
             obj = self.bound_to
         cache = self.get_cache(obj)
-        key_args = (obj, self.func) + args if self.scoped else args
-        key = self.key_func(key_args, kwargs, typed=self.typed)
+        if self.key_builder is not None:
+            try:
+                key = self.key_builder.make_key((obj,) + args, kwargs)
+            except UncacheableArgumentError:
+                return self.func(obj, *args, **kwargs)
+        else:
+            key_args = (obj, self.func) + args if self.scoped else args
+            key = self.key_func(key_args, kwargs, typed=self.typed)
         try:
             ret = cache[key]
         except KeyError:
@@ -532,9 +879,10 @@ class CachedMethod:
         return ("%s(func=%r, scoped=%r, typed=%r)" % args)
 
 
-def cached(cache, scoped=True, typed=False, key=None):
+def cached(cache, scoped=True, typed=False, key=None, converters=None):
     """Cache any function with the cache object of your choosing. Note
-    that the function wrapped should take only `hashable`_ arguments.
+    that the function wrapped should take only `hashable`_ arguments,
+    unless *converters* is provided.
 
     Args:
         cache (Mapping): Any :class:`dict`-like object suitable for
@@ -551,6 +899,19 @@ def cached(cache, scoped=True, typed=False, key=None):
         typed (bool): Whether to factor argument types into the cache
             check. Default ``False``, setting to ``True`` causes the
             cache keys for ``3`` and ``3.0`` to be considered unequal.
+        key (callable): A callable with a signature that matches
+            :func:`make_cache_key` that returns a hashable value to be
+            used as the key in the cache. Mutually exclusive with
+            *converters*.
+        converters (dict): Optional mapping of types to callables that
+            convert values of that exact type into stable, hashable key
+            data. When provided, keys are normalized through the wrapped
+            function's signature via
+            :class:`SignatureCacheKeyBuilder`, so positional, keyword,
+            and default-omitted calls with the same arguments share one
+            cache entry. Arguments with no registered or naturally
+            hashable representation are not cached; the function still
+            runs normally. Mutually exclusive with *key*.
 
     >>> my_cache = LRU()
     >>> @cached(my_cache)
@@ -566,11 +927,12 @@ def cached(cache, scoped=True, typed=False, key=None):
 
     """
     def cached_func_decorator(func):
-        return CachedFunction(func, cache, scoped=scoped, typed=typed, key=key)
+        return CachedFunction(func, cache, scoped=scoped, typed=typed,
+                              key=key, converters=converters)
     return cached_func_decorator
 
 
-def cachedmethod(cache, scoped=True, typed=False, key=None):
+def cachedmethod(cache, scoped=True, typed=False, key=None, converters=None):
     """Similar to :func:`cached`, ``cachedmethod`` is used to cache
     methods based on their arguments, using any :class:`dict`-like
     *cache* object.
@@ -590,7 +952,15 @@ def cachedmethod(cache, scoped=True, typed=False, key=None):
             cache keys for ``3`` and ``3.0`` to be considered unequal.
         key (callable): A callable with a signature that matches
             :func:`make_cache_key` that returns a tuple of hashable
-            values to be used as the key in the cache.
+            values to be used as the key in the cache. Mutually
+            exclusive with *converters*.
+        converters (dict): Optional type-to-callable mapping enabling
+            signature-normalized keys, as with :func:`cached`. The
+            bound instance is normalized through the method's ``self``
+            parameter, so bound (``obj.m(x)``) and explicit unbound
+            (``C.m(obj, x)``) calls share one entry. Calls that cannot
+            be represented stably bypass the cache rather than mixing
+            entries. Mutually exclusive with *key*.
 
     >>> class Lowerer(object):
     ...     def __init__(self):
@@ -608,7 +978,8 @@ def cachedmethod(cache, scoped=True, typed=False, key=None):
 
     """
     def cached_method_decorator(func):
-        return CachedMethod(func, cache, scoped=scoped, typed=typed, key=key)
+        return CachedMethod(func, cache, scoped=scoped, typed=typed,
+                            key=key, converters=converters)
     return cached_method_decorator
 
 

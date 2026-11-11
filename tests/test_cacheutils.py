@@ -5,6 +5,10 @@ from abc import abstractmethod, ABCMeta
 import pytest
 
 from boltons.cacheutils import LRU, LRI, cached, cachedmethod, cachedproperty, MinIDMap, ThresholdCounter
+from boltons.cacheutils import (SignatureCacheKeyBuilder,
+                                UncacheableArgumentError,
+                                make_cache_key,
+                                make_signature_cache_key)
 
 
 class CountingCallable:
@@ -608,3 +612,414 @@ def test_threshold_counter_non_reciprocal_threshold():
     for _ in range(20):
         tc.add('a')
     assert tc.get('a') == 20
+
+
+# --- signature-normalized cache keys -------------------------------------
+
+LIST_CONVERTER = lambda value: ('list', tuple(value))
+DICT_CONVERTER = lambda value: ('dict', tuple(sorted(value.items())))
+NORMALIZING_CONVERTERS = {list: LIST_CONVERTER, dict: DICT_CONVERTER}
+
+
+def test_signature_key_positional_keyword_default_share():
+    def clean(text, strip=True):
+        return text.strip() if strip else text
+
+    builder = SignatureCacheKeyBuilder(clean)
+
+    positional = builder.make_key(('  hi ',), {})
+    keyword = builder.make_key((), {'text': '  hi '})
+    explicit_default = builder.make_key(('  hi ', True), {})
+    keyword_default = builder.make_key(('  hi ',), {'strip': True})
+
+    assert positional == keyword == explicit_default == keyword_default
+    assert hash(positional) == hash(keyword)
+
+    different = builder.make_key(('  hi ', False), {})
+    assert different != positional
+    assert builder.make_key(('bye',), {}) != positional
+
+
+def test_signature_key_memoizes_across_call_styles():
+    cache = LRU()
+
+    @cached(cache, converters=NORMALIZING_CONVERTERS)
+    def clean(items, options=None, strict=True):
+        clean.call_count += 1
+        return sum(items)
+
+    clean.call_count = 0
+
+    assert clean([1, 2, 3]) == 6
+    assert clean([1, 2, 3], None) == 6
+    assert clean(items=[1, 2, 3]) == 6
+    assert clean([1, 2, 3], options=None, strict=True) == 6
+    assert clean(options=None, items=[1, 2, 3]) == 6
+    assert clean.call_count == 1
+    assert len(cache) == 1
+
+    # genuinely different calls get their own entries
+    assert clean([1, 2, 3], strict=False) == 6
+    assert clean.call_count == 2
+    assert clean([3, 2, 1]) == 6
+    assert clean.call_count == 3
+
+
+def test_signature_key_uses_registered_converters():
+    def func(items, mapping):
+        return items, mapping
+
+    builder = SignatureCacheKeyBuilder(func, converters=NORMALIZING_CONVERTERS)
+
+    via_args = builder.make_key(([1, 2], {'a': 1}), {})
+    via_kwargs = builder.make_key((), {'items': [1, 2],
+                                       'mapping': {'a': 1}})
+    assert via_args == via_kwargs
+
+    other = builder.make_key(([1, 2], {'a': 2}), {})
+    assert other != via_args
+
+
+def test_signature_key_unhashable_without_converter_is_uncacheable():
+    class CustomUnhashable:
+        __hash__ = None
+
+    def func(blob):
+        return blob
+
+    builder = SignatureCacheKeyBuilder(func)
+    with pytest.raises(UncacheableArgumentError):
+        builder.make_key((CustomUnhashable(),), {})
+
+    # registering a representation makes it cacheable
+    registered = SignatureCacheKeyBuilder(
+        func, converters={CustomUnhashable: lambda value: ('blob',)})
+    assert registered.make_key((CustomUnhashable(),), {}) == registered.make_key(
+        (), {'blob': CustomUnhashable()})
+
+
+def test_signature_key_identity_only_object_is_uncacheable():
+    class PlainInstance:
+        def __init__(self, tag):
+            self.tag = tag
+
+    builder = SignatureCacheKeyBuilder(lambda blob: None)
+    with pytest.raises(UncacheableArgumentError):
+        builder.make_key((PlainInstance('a'),), {})
+
+    # an explicitly registered converter declaring a value-based
+    # representation is the supported escape hatch
+    registered = SignatureCacheKeyBuilder(
+        lambda blob: None,
+        converters={PlainInstance: lambda value: ('blob', value.tag)})
+    key = registered.make_key((PlainInstance('a'),), {})
+    assert hash(key)
+    assert key == registered.make_key((PlainInstance('a'),), {})
+
+
+def test_uncacheable_call_bypasses_cache_but_still_runs():
+    class MutableBlob:
+        pass
+
+    cache = LRU()
+
+    @cached(cache, converters={int: lambda value: value})
+    def work(amount, blob):
+        work.call_count += 1
+        return amount
+
+    work.call_count = 0
+    blob = MutableBlob()
+    assert work(1, blob) == 1
+    assert work(1, blob) == 1
+    assert work.call_count == 2  # never cached, executed every time
+    assert len(cache) == 0
+
+    class UnhashableBlob:
+        __hash__ = None
+
+    assert work(2, UnhashableBlob()) == 2
+    assert work.call_count == 3
+    assert len(cache) == 0
+
+
+def test_signature_key_varargs_do_not_collapse_distinct_calls():
+    cache = LRU()
+
+    @cached(cache, converters={})
+    def variadic(*values):
+        variadic.call_count += 1
+        return values
+
+    variadic.call_count = 0
+    variadic(1, 2)
+    variadic(1, 2)
+    assert variadic.call_count == 1
+
+    # one tuple argument is not the same call as two varargs
+    variadic((1, 2))
+    assert variadic.call_count == 2
+
+    variadic(1, 2, 3)
+    assert variadic.call_count == 3
+    assert len(cache) == 3
+
+
+def test_signature_key_kwargs_order_independent_but_distinct():
+    cache = LRU()
+
+    @cached(cache, converters={})
+    def keyword_only(**options):
+        keyword_only.call_count += 1
+        return options
+
+    keyword_only.call_count = 0
+    keyword_only(a=1, b=2)
+    keyword_only(b=2, a=1)
+    assert keyword_only.call_count == 1
+
+    keyword_only(a=1)
+    assert keyword_only.call_count == 2
+
+
+def test_signature_key_typed_and_container_kind_tags():
+    builder = SignatureCacheKeyBuilder(lambda a, b: None)
+    # numeric types collapse when typed is off, matching make_cache_key
+    assert (builder.make_key((1, 1.0), {})
+            == builder.make_key((1.0, 1), {}))
+
+    typed_builder = SignatureCacheKeyBuilder(
+        lambda a, b: None, typed=True)
+    assert (typed_builder.make_key((1, 1.0), {})
+            != typed_builder.make_key((1.0, 1), {}))
+
+    # containers always carry kind markers: list != tuple of equal contents
+    container_builder = SignatureCacheKeyBuilder(lambda a: None)
+    assert (container_builder.make_key(([1, 2],), {})
+            != container_builder.make_key(((1, 2),), {}))
+    # list order is significant, set order is not
+    assert (container_builder.make_key(([1, 2],), {})
+            != container_builder.make_key(([2, 1],), {}))
+    assert (container_builder.make_key(({1, 2},), {})
+            == container_builder.make_key(({2, 1},), {}))
+
+
+def test_signature_key_nested_containers_recurse():
+    builder = SignatureCacheKeyBuilder(lambda a: None)
+    value = [{'x': [1, 2]}, (3, {4, 5})]
+    assert (builder.make_key((value,), {})
+            == builder.make_key(([{'x': [1, 2]}, (3, {5, 4})],), {}))
+
+
+def test_signature_key_converter_must_return_hashable():
+    builder = SignatureCacheKeyBuilder(
+        lambda a: None, converters={int: lambda value: [value]})
+    with pytest.raises(UncacheableArgumentError):
+        builder.make_key((1,), {})
+
+
+def test_signature_key_builder_validates_converters():
+    with pytest.raises(TypeError):
+        SignatureCacheKeyBuilder(lambda a: None, converters={1: int})
+    with pytest.raises(TypeError):
+        SignatureCacheKeyBuilder(lambda a: None, converters={int: 3})
+
+
+def test_cached_rejects_key_and_converters_together():
+    with pytest.raises(TypeError):
+        cached(LRU(), key=make_cache_key, converters={int: int})(lambda a: a)
+    with pytest.raises(TypeError):
+        cachedmethod('cache', key=make_cache_key,
+                     converters={int: int})(lambda self, a: a)
+
+
+def test_cachedmethod_normalized_bound_unbound_and_keyword_share():
+    class Calculator:
+        def __init__(self):
+            self.cache = {}
+            self.call_count = 0
+
+        @cachedmethod('cache', converters={})
+        def double(self, x):
+            self.call_count += 1
+            return x * 2
+
+    one = Calculator()
+    two = Calculator()
+
+    assert one.double(3) == 6
+    assert Calculator.double(one, 3) == 6
+    assert one.double(x=3) == 6
+    assert one.call_count == 1
+    assert len(one.cache) == 1
+
+    # a different instance must never read the first one's entries
+    assert two.double(3) == 6
+    assert two.call_count == 1
+    assert len(two.cache) == 1
+
+
+def test_cachedmethod_normalized_with_converters_and_varargs():
+    class Parser:
+        def __init__(self):
+            self.cache = {}
+            self.call_count = 0
+
+        @cachedmethod('cache', converters=NORMALIZING_CONVERTERS)
+        def run(self, rows, *flags):
+            self.call_count += 1
+            return len(rows) + len(flags)
+
+    parser = Parser()
+    assert parser.run([1, 2]) == 2
+    assert Parser.run(parser, [1, 2]) == 2
+    assert parser.run(rows=[1, 2]) == 2
+    assert parser.call_count == 1
+
+    # adding a vararg is a different call
+    assert parser.run([1, 2], 1) == 3
+    assert parser.call_count == 2
+
+    # a single tuple argument is not the same call as one numeric vararg
+    assert parser.run([1, 2], (1,)) == 3
+    assert parser.call_count == 3
+
+
+def test_cachedmethod_uncacheable_argument_bypasses_cache():
+    class Session:
+        pass
+
+    class Service:
+        def __init__(self):
+            self.cache = {}
+            self.call_count = 0
+
+        @cachedmethod('cache', converters={int: lambda value: value})
+        def handle(self, x, session):
+            self.call_count += 1
+            return x
+
+    service = Service()
+    session = Session()
+    assert service.handle(1, session) == 1
+    assert Service.handle(service, 1, session) == 1
+    assert service.call_count == 2
+    assert service.cache == {}
+
+
+def test_make_signature_cache_key_helper():
+    def func(a, b=2):
+        return a + b
+
+    first = make_signature_cache_key(func, (1,), {})
+    second = make_signature_cache_key(func, (), {'a': 1})
+    third = make_signature_cache_key(func, (1, 2), {})
+    assert first == second == third
+
+
+def test_signature_key_cyclic_container_is_uncacheable():
+    cyclic = [1]
+    cyclic.append(cyclic)
+    builder = SignatureCacheKeyBuilder(lambda value: None)
+    with pytest.raises(UncacheableArgumentError):
+        builder.make_key((cyclic,), {})
+
+    # shared (non-cyclic) references still normalize correctly
+    shared = [1]
+    diamond = [shared, shared]
+    assert (builder.make_key((diamond,), {})
+            == builder.make_key(([[1], [1]],), {}))
+
+
+def test_signature_key_positional_only_and_keyword_only():
+    cache = LRU()
+
+    @cached(cache, converters={})
+    def func(a, /, b, *, c=3):
+        func.call_count += 1
+        return (a, b, c)
+
+    func.call_count = 0
+    func(1, 2)
+    func(1, 2, c=3)
+    func(1, b=2)
+    assert func.call_count == 1
+
+    func(1, 2, c=4)
+    assert func.call_count == 2
+
+
+def test_signature_key_mutable_default_omitted_vs_explicit():
+    cache = LRU()
+
+    @cached(cache, converters={list: tuple})
+    def func(items=()):
+        func.call_count += 1
+        return len(items)
+
+    func.call_count = 0
+    func()
+    func(items=())
+    assert func.call_count == 1
+
+    func([1])
+    assert func.call_count == 2
+
+
+def test_signature_key_uncacheable_nested_in_container_bypasses():
+    class Blob:
+        pass
+
+    cache = LRU()
+
+    @cached(cache, converters={})
+    def func(value):
+        func.call_count += 1
+        return value
+
+    func.call_count = 0
+    func([1, Blob()])
+    func([1, Blob()])
+    assert func.call_count == 2
+    assert cache == {}
+
+
+def test_cachedmethod_self_in_varargs_still_scopes_per_instance():
+    class Service:
+        def __init__(self):
+            self.cache = {}
+            self.call_count = 0
+
+        @cachedmethod('cache', converters={})
+        def method(*args):
+            self = args[0]
+            self.call_count += 1
+            return args[1:]
+
+    one = Service()
+    two = Service()
+    assert one.method(1, 2) == (1, 2)
+    assert Service.method(one, 1, 2) == (1, 2)
+    assert one.call_count == 1
+    assert two.method(1, 2) == (1, 2)
+    assert two.call_count == 1
+
+
+def test_cachedmethod_unhashable_bound_instance_bypasses():
+    class Unhashable:
+        __hash__ = None
+
+        def __init__(self):
+            self.cache = {}
+            self.call_count = 0
+
+        @cachedmethod('cache', converters={})
+        def method(self, x):
+            self.call_count += 1
+            return x
+
+    instance = Unhashable()
+    assert instance.method(5) == 5
+    assert instance.method(5) == 5
+    assert instance.call_count == 2
+    assert instance.cache == {}
