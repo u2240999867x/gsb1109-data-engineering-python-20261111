@@ -1,6 +1,7 @@
 import functools
 import inspect
 import sys
+import threading
 import typing
 import pytest
 import toolz
@@ -191,6 +192,144 @@ def test_memoize_wrapped():
         pass
     memoized_foo = memoize(foo)
     assert memoized_foo.__wrapped__ is foo
+
+
+def test_memoize_version_reuses_within_version():
+    calls = [0]
+    current_version = [1]
+
+    @memoize(version=lambda: current_version[0])
+    def f(x):
+        calls[0] += 1
+        return (x, current_version[0])
+
+    assert f(1) == (1, 1)
+    assert f(1) == (1, 1)  # reused within the same version
+    assert calls == [1]
+    assert f(2) == (2, 1)
+    assert calls == [2]
+
+
+def test_memoize_version_separates_versions():
+    calls = [0]
+    current_version = [1]
+
+    @memoize(version=lambda: current_version[0])
+    def f(x):
+        calls[0] += 1
+        return (x, current_version[0])
+
+    assert f(1) == (1, 1)
+    current_version[0] = 2
+    assert f(1) == (1, 2)  # cache miss under the new version
+    assert calls == [2]
+
+    current_version[0] = 1
+    assert f(1) == (1, 1)  # the old version's entry is still intact
+    assert calls == [2]
+
+
+def test_memoize_version_read_once_per_call():
+    reads = [0]
+
+    @memoize(version=lambda: reads.__setitem__(0, reads[0] + 1) or 1)
+    def f(x):
+        return x
+
+    f('a')
+    f('a')  # cache hit, but the version is still read once for this call
+    assert reads == [2]
+
+
+def test_memoize_stale_result_not_published_to_new_version():
+    current_version = [1]
+    entered = threading.Event()
+    release = threading.Event()
+    calls = [0]
+
+    @memoize(version=lambda: current_version[0])
+    def slow(x):
+        calls[0] += 1
+        entered.set()
+        release.wait(timeout=5)
+        return 'result-%d' % calls[0]
+
+    holder = {}
+
+    def worker():
+        holder['v1'] = slow('a')
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert entered.wait(timeout=5)
+    # The version changes while the v1 computation is still running.
+    current_version[0] = 2
+    release.set()
+    thread.join()
+
+    # The late result is cached under the version (v1) captured at call time.
+    assert holder['v1'] == 'result-1'
+
+    # v2 must have no cached entry: this recomputes instead of reading the
+    # result that finished late under v1.
+    assert slow('a') == 'result-2'
+    current_version[0] = 1
+    assert slow('a') == 'result-1'  # v1's own entry was cached separately
+    assert calls == [2]
+
+
+def test_memoize_version_none_keeps_plain_behavior():
+    backing = {}
+    calls = [0]
+
+    @memoize(cache=backing, version=lambda: None)
+    def f(x):
+        calls[0] += 1
+        return x
+
+    assert f(1) == 1
+    assert f(1) == 1
+    assert calls == [1]
+    assert backing == {1: 1}  # the supplied cache is used directly
+
+
+def test_memoize_without_version_unchanged():
+    backing = {1: 'seeded'}
+    calls = [0]
+
+    @memoize(cache=backing)
+    def f(x):
+        calls[0] += 1
+        return 'computed'
+
+    assert f(1) == 'seeded'
+    assert f(2) == 'computed'
+    assert calls == [1]
+    assert backing[2] == 'computed'
+
+
+def test_memoize_version_with_key():
+    current_version = [1]
+
+    @memoize(key=lambda args, kwargs: args[0],
+             version=lambda: current_version[0])
+    def f(x, y):
+        return (x + y, current_version[0])
+
+    assert f(1, 10) == (11, 1)
+    assert f(1, 20) == (11, 1)  # same key, reused within the version
+    current_version[0] = 2
+    assert f(1, 20) == (21, 2)  # new version bypasses the old entry
+
+
+def test_memoize_version_curried():
+    current_version = [1]
+    mf = memoize(lambda x: (x, current_version[0]),
+                 version=lambda: current_version[0])
+
+    assert mf(1) == (1, 1)
+    current_version[0] = 2
+    assert mf(1) == (1, 2)
 
 
 def test_curry_simple():

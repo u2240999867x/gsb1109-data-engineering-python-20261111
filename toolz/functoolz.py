@@ -390,8 +390,50 @@ def _restore_curry(cls, func, args, kwargs, userdict, is_decorated):
     return obj
 
 
+class _versioned_cache:
+    """ Cache facade partitioning entries by a context version
+
+    Wraps a single backing cache and presents one independent sub-cache per
+    version.  The active version is read once, at the start of every call, via
+    the supplied callable; every result is written back to the sub-cache of
+    the version captured when that call started, so a slow computation can
+    never publish its result under a newer version.
+
+    Without a ``version`` callable (or when it returns ``None``) the backing
+    cache itself is used, preserving plain argument-only memoization.
+    """
+    def __init__(self, cache, version):
+        self._cache = cache
+        self._version = version
+        self._versions = {}
+
+    def current(self):
+        if self._version is None:
+            return None
+        return self._version()
+
+    def subcache(self, ver):
+        if ver is None:
+            return self._cache
+        try:
+            return self._versions[ver]
+        except KeyError:
+            try:
+                sub = type(self._cache)()
+            except TypeError:
+                sub = {}
+            self._versions[ver] = sub
+            return sub
+
+    def get(self, ver, key):
+        return self.subcache(ver)[key]
+
+    def put(self, ver, key, result):
+        self.subcache(ver)[key] = result
+
+
 @curry
-def memoize(func, cache=None, key=None):
+def memoize(func, cache=None, key=None, version=None):
     """ Cache a function's result for speedy future evaluation
 
     Considerations:
@@ -426,9 +468,27 @@ def memoize(func, cache=None, key=None):
     ...     if verbose:
     ...         print('Calculating %s + %s' % (x, y))
     ...     return x + y
+
+    Provide a ``version`` callable to keep separate caches per context
+    version.  The version is read once per call, at call time; results are
+    reused only within the same version, and a result computed under an older
+    version is never stored under a newer one even if its computation finishes
+    after the version changed.  Without ``version`` (or when it returns
+    ``None``) the plain argument-only behavior above is preserved.
+
+    >>> context = {'version': 1}
+    >>> @memoize(version=lambda: context['version'])
+    ... def clean(address):
+    ...     return (address, context['version'])
+    >>> clean('a')
+    ('a', 1)
+    >>> context['version'] = 2
+    >>> clean('a')  # new version: cache miss, recomputed
+    ('a', 2)
     """
     if cache is None:
         cache = {}
+    cache = _versioned_cache(cache, version)
 
     try:
         may_have_kwargs = has_keywords(func) is not False
@@ -453,13 +513,17 @@ def memoize(func, cache=None, key=None):
                 return args
 
     def memof(*args, **kwargs):
+        # Read the version exactly once per call so the whole lookup uses a
+        # single, fixed point in time.
+        ver = cache.current()
         k = key(args, kwargs)
         try:
-            return cache[k]
+            return cache.get(ver, k)
         except TypeError:
             raise TypeError("Arguments to memoized function must be hashable")
         except KeyError:
-            cache[k] = result = func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            cache.put(ver, k, result)
             return result
 
     try:

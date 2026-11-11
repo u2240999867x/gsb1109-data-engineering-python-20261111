@@ -586,7 +586,7 @@ module_info['toolz'] = dict(
     juxt=[
         (0, lambda *funcs: None)],
     memoize=[
-        (0, lambda func=None, cache=None, key=None: None)],
+        (0, lambda func=None, cache=None, key=None, version=None: None)],
 )
 
 module_info['toolz.functoolz'] = dict(
