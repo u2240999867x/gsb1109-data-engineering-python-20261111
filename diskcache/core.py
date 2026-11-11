@@ -417,12 +417,17 @@ def args_to_key(base, args, kwargs, typed, ignore):
 class Cache:
     """Disk and file backed cache."""
 
-    def __init__(self, directory=None, timeout=60, disk=Disk, **settings):
+    def __init__(
+        self, directory=None, timeout=60, disk=Disk, scope=None, **settings
+    ):
         """Initialize cache instance.
 
         :param str directory: cache directory
         :param float timeout: SQLite connection timeout
         :param disk: Disk type or subclass for serialization
+        :param scope: tenant identifier; when not None, the cache acts as a
+            scoped view and only items written through this or another view of
+            the same scope are visible (default None, unscoped legacy cache)
         :param settings: any of DEFAULT_SETTINGS
 
         """
@@ -441,6 +446,10 @@ class Cache:
         self._timeout = 0  # Manually handle retries during initialization.
         self._local = threading.local()
         self._txn_id = None
+        self._scope = None if scope is None else self.validate_scope(scope)
+        self._scope_token = (
+            None if self._scope is None else self._encode_scope(self._scope)
+        )
 
         if not op.isdir(directory):
             try:
@@ -529,9 +538,66 @@ class Cache:
             ' Cache(key, raw)'
         )
 
+        # Add the scope column used by scoped cache views. Existing rows from
+        # caches created without scope support are left untouched: they keep a
+        # NULL scope, remain visible through the unscoped interface, and are
+        # never migrated into a view.
+
+        columns = {
+            row[1] for row in sql('PRAGMA table_info(Cache)').fetchall()
+        }
+        scope_added = 'scope' not in columns
+
+        if scope_added:
+            try:
+                sql('ALTER TABLE Cache ADD COLUMN scope BLOB')
+            except sqlite3.OperationalError as error:
+                # Another process may have added the column concurrently.
+                if 'duplicate column name' not in str(error):
+                    raise
+
+        index_names = {
+            row[0]
+            for row in sql(
+                "SELECT name FROM sqlite_master"
+                " WHERE type = 'index' AND tbl_name = 'Cache'"
+            ).fetchall()
+        }
+
+        # A partial unique index preserves the legacy uniqueness guarantee for
+        # unscoped rows while the composite index allows identical keys to
+        # exist independently in different scopes. Only run the index migration
+        # when the schema still needs it, keeping cache opens read-only
+        # otherwise.
+
+        if scope_added or 'Cache_scope_key_raw' not in index_names:
+            sql('DROP INDEX IF EXISTS Cache_key_raw')
+            sql(
+                'CREATE UNIQUE INDEX IF NOT EXISTS Cache_key_raw ON'
+                ' Cache(key, raw) WHERE scope IS NULL'
+            )
+            sql(
+                'CREATE UNIQUE INDEX IF NOT EXISTS Cache_scope_key_raw ON'
+                ' Cache(scope, key, raw) WHERE scope IS NOT NULL'
+            )
+            sql(
+                'CREATE INDEX IF NOT EXISTS Cache_scope_tag ON'
+                ' Cache(scope, tag)'
+                ' WHERE scope IS NOT NULL AND tag IS NOT NULL'
+            )
+
         sql(
             'CREATE INDEX IF NOT EXISTS Cache_expire_time ON'
             ' Cache (expire_time) WHERE expire_time IS NOT NULL'
+        )
+
+        # Per-scope hit and miss counters for scoped view statistics.
+
+        sql(
+            'CREATE TABLE IF NOT EXISTS ScopeStats ('
+            ' scope BLOB PRIMARY KEY,'
+            ' hits INTEGER DEFAULT 0,'
+            ' misses INTEGER DEFAULT 0)'
         )
 
         query = EVICTION_POLICY[self.eviction_policy]['init']
@@ -604,6 +670,99 @@ class Cache:
     def disk(self):
         """Disk used for serialization."""
         return self._disk
+
+    @property
+    def scope(self):
+        """Scope of the cache view, or None for an unscoped cache."""
+        return self._scope
+
+    @staticmethod
+    def validate_scope(scope):
+        """Validate that `scope` may be used as a cache scope.
+
+        Any picklable, non-None value is accepted. The scope identifies a
+        tenant and is stored alongside every item written through a scoped
+        cache view.
+
+        :param scope: scope identifier
+        :return: scope identifier
+        :raises ValueError: if scope is None or cannot be pickled
+
+        """
+        if scope is None:
+            raise ValueError('scope must not be None')
+        try:
+            pickle.dumps(scope, protocol=pickle.HIGHEST_PROTOCOL)
+        except (pickle.PicklingError, TypeError, AttributeError) as error:
+            raise ValueError('scope must be picklable') from error
+        return scope
+
+    def _encode_scope(self, scope):
+        data = pickle.dumps(scope, protocol=pickle.HIGHEST_PROTOCOL)
+        return sqlite3.Binary(pickletools.optimize(data))
+
+    def _scope_filter(self, alias='Cache'):
+        """Return SQL fragment and args restricting rows to the cache scope.
+
+        The unscoped cache is the legacy scope: it only sees rows with a NULL
+        scope, so views and the legacy interface never observe each other's
+        data.
+
+        """
+        if self._scope is None:
+            return ' AND %s.scope IS NULL' % alias, ()
+        return ' AND %s.scope IS ?' % alias, (self._scope_token,)
+
+    def _scope_value(self):
+        """Return the value stored in the scope column on insert."""
+        return None if self._scope is None else self._scope_token
+
+    def _scope_cull_query(self, template, fields, now):
+        """Return a cull query restricted to the cache scope."""
+        query = template.format(fields=fields, now=now)
+        scope_condition = self._scope_filter()[0]
+        condition = scope_condition[len(' AND ') :]
+
+        marker = ' FROM Cache'
+        head, tail = query.split(marker, 1)
+        ends = [
+            pos
+            for pos in (tail.find(' ORDER BY '), tail.find(' LIMIT '))
+            if pos >= 0
+        ]
+        end = min(ends) if ends else len(tail)
+        segment = tail[:end]
+
+        if ' WHERE ' in segment:
+            segment = segment.rstrip() + ' AND ' + condition + ' '
+        else:
+            segment = ' WHERE ' + condition + ' '
+
+        return head + marker + segment + tail[end:]
+
+    def view(self, scope):
+        """Return a scoped view of the cache for tenant `scope`.
+
+        The view shares the same directory and settings. Reads, writes,
+        iteration, tag-based eviction, and statistics through the view only
+        consider items stored under the same scope. Identical keys and tags may
+        exist independently in different scopes.
+
+        Items written through unscoped caches are not migrated into views and
+        remain visible only through the unscoped interface.
+
+        :param scope: tenant identifier for the view
+        :return: Cache view restricted to `scope`
+
+        """
+        scope = self.validate_scope(scope)
+        view = self.__class__.__new__(self.__class__)
+        view.__dict__.update(self.__dict__)
+        view._local = threading.local()
+        view._txn_id = None
+        view._scope = scope
+        view._scope_token = view._encode_scope(scope)
+        return view
 
     @property
     def _con(self):
@@ -794,10 +953,11 @@ class Cache:
         # need cleanup.
 
         with self._transact(retry, filename) as (sql, cleanup):
+            scope_clause, scope_args = self._scope_filter()
             rows = sql(
                 'SELECT rowid, filename FROM Cache'
-                ' WHERE key = ? AND raw = ?',
-                (db_key, raw),
+                ' WHERE key = ? AND raw = ?' + scope_clause,
+                (db_key, raw) + scope_args,
             ).fetchall()
 
             if rows:
@@ -857,8 +1017,8 @@ class Cache:
         sql(
             'INSERT INTO Cache('
             ' key, raw, store_time, expire_time, access_time,'
-            ' access_count, tag, size, mode, filename, value'
-            ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            ' access_count, tag, size, mode, filename, value, scope'
+            ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 key,
                 raw,
@@ -871,6 +1031,7 @@ class Cache:
                 mode,
                 filename,
                 value,
+                self._scope_value(),
             ),
         )
 
@@ -880,22 +1041,27 @@ class Cache:
         if cull_limit == 0:
             return
 
+        scope_clause, scope_args = self._scope_filter()
+
         # Evict expired keys.
 
         select_expired_template = (
             'SELECT %s FROM Cache'
             ' WHERE expire_time IS NOT NULL AND expire_time < ?'
-            ' ORDER BY expire_time LIMIT ?'
+            + scope_clause
+            + ' ORDER BY expire_time LIMIT ?'
         )
 
         select_expired = select_expired_template % 'filename'
-        rows = sql(select_expired, (now, cull_limit)).fetchall()
+        rows = sql(
+            select_expired, (now,) + scope_args + (cull_limit,)
+        ).fetchall()
 
         if rows:
             delete_expired = 'DELETE FROM Cache WHERE rowid IN (%s)' % (
                 select_expired_template % 'rowid'
             )
-            sql(delete_expired, (now, cull_limit))
+            sql(delete_expired, (now,) + scope_args + (cull_limit,))
 
             for (filename,) in rows:
                 cleanup(filename)
@@ -912,14 +1078,18 @@ class Cache:
         if select_policy is None or self.volume() < self.size_limit:
             return
 
-        select_filename = select_policy.format(fields='filename', now=now)
-        rows = sql(select_filename, (cull_limit,)).fetchall()
+        select_filename = self._scope_cull_query(
+            select_policy, fields='filename', now=now
+        )
+        rows = sql(
+            select_filename, scope_args + (cull_limit,)
+        ).fetchall()
 
         if rows:
             delete = 'DELETE FROM Cache WHERE rowid IN (%s)' % (
-                select_policy.format(fields='rowid', now=now)
+                self._scope_cull_query(select_policy, fields='rowid', now=now)
             )
-            sql(delete, (cull_limit,))
+            sql(delete, scope_args + (cull_limit,))
 
             for (filename,) in rows:
                 cleanup(filename)
@@ -943,10 +1113,11 @@ class Cache:
         expire_time = None if expire is None else now + expire
 
         with self._transact(retry) as (sql, _):
+            scope_clause, scope_args = self._scope_filter()
             rows = sql(
                 'SELECT rowid, expire_time FROM Cache'
-                ' WHERE key = ? AND raw = ?',
-                (db_key, raw),
+                ' WHERE key = ? AND raw = ?' + scope_clause,
+                (db_key, raw) + scope_args,
             ).fetchall()
 
             if rows:
@@ -993,10 +1164,11 @@ class Cache:
         columns = (expire_time, tag, size, mode, filename, db_value)
 
         with self._transact(retry, filename) as (sql, cleanup):
+            scope_clause, scope_args = self._scope_filter()
             rows = sql(
                 'SELECT rowid, filename, expire_time FROM Cache'
-                ' WHERE key = ? AND raw = ?',
-                (db_key, raw),
+                ' WHERE key = ? AND raw = ?' + scope_clause,
+                (db_key, raw) + scope_args,
             ).fetchall()
 
             if rows:
@@ -1042,13 +1214,14 @@ class Cache:
         """
         now = time.time()
         db_key, raw = self._disk.put(key)
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid, expire_time, filename, value FROM Cache'
-            ' WHERE key = ? AND raw = ?'
+            ' WHERE key = ? AND raw = ?' + scope_clause
         )
 
         with self._transact(retry) as (sql, cleanup):
-            rows = sql(select, (db_key, raw)).fetchall()
+            rows = sql(select, (db_key, raw) + scope_args).fetchall()
 
             if not rows:
                 if default is None:
@@ -1148,11 +1321,14 @@ class Cache:
         """
         db_key, raw = self._disk.put(key)
         update_column = EVICTION_POLICY[self.eviction_policy]['get']
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid, expire_time, tag, mode, filename, value'
             ' FROM Cache WHERE key = ? AND raw = ?'
-            ' AND (expire_time IS NULL OR expire_time > ?)'
+            + scope_clause
+            + ' AND (expire_time IS NULL OR expire_time > ?)'
         )
+        select_args = (db_key, raw) + scope_args
 
         if expire_time and tag:
             default = (default, None, None)
@@ -1162,7 +1338,9 @@ class Cache:
         if not self.statistics and update_column is None:
             # Fast path, no transaction necessary.
 
-            rows = self._sql(select, (db_key, raw, time.time())).fetchall()
+            rows = self._sql(
+                select, select_args + (time.time(),)
+            ).fetchall()
 
             if not rows:
                 return default
@@ -1176,19 +1354,37 @@ class Cache:
                 return default
 
         else:  # Slow path, transaction required.
-            cache_hit = (
-                'UPDATE Settings SET value = value + 1 WHERE key = "hits"'
-            )
-            cache_miss = (
-                'UPDATE Settings SET value = value + 1 WHERE key = "misses"'
-            )
+            if self._scope is None:
+                cache_hit = (
+                    'UPDATE Settings SET value = value + 1 WHERE key = "hits"'
+                )
+                cache_miss = (
+                    'UPDATE Settings SET value = value + 1'
+                    ' WHERE key = "misses"'
+                )
+            else:
+                cache_hit = (
+                    'INSERT INTO ScopeStats(scope, hits, misses)'
+                    ' VALUES (?, 1, 0)'
+                    ' ON CONFLICT(scope) DO UPDATE SET hits = hits + 1'
+                )
+                cache_miss = (
+                    'INSERT INTO ScopeStats(scope, hits, misses)'
+                    ' VALUES (?, 0, 1)'
+                    ' ON CONFLICT(scope) DO UPDATE SET misses = misses + 1'
+                )
 
             with self._transact(retry) as (sql, _):
-                rows = sql(select, (db_key, raw, time.time())).fetchall()
+                rows = sql(
+                    select, select_args + (time.time(),)
+                ).fetchall()
 
                 if not rows:
                     if self.statistics:
-                        sql(cache_miss)
+                        if self._scope is None:
+                            sql(cache_miss)
+                        else:
+                            sql(cache_miss, (self._scope_token,))
                     return default
 
                 (
@@ -1200,11 +1396,17 @@ class Cache:
                 except IOError:
                     # Key was deleted before we could retrieve result.
                     if self.statistics:
-                        sql(cache_miss)
+                        if self._scope is None:
+                            sql(cache_miss)
+                        else:
+                            sql(cache_miss, (self._scope_token,))
                     return default
 
                 if self.statistics:
-                    sql(cache_hit)
+                    if self._scope is None:
+                        sql(cache_hit)
+                    else:
+                        sql(cache_hit, (self._scope_token,))
 
                 now = time.time()
                 update = 'UPDATE Cache SET %s WHERE rowid = ?'
@@ -1261,13 +1463,17 @@ class Cache:
         """
         sql = self._sql
         db_key, raw = self._disk.put(key)
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid FROM Cache'
             ' WHERE key = ? AND raw = ?'
-            ' AND (expire_time IS NULL OR expire_time > ?)'
+            + scope_clause
+            + ' AND (expire_time IS NULL OR expire_time > ?)'
         )
 
-        rows = sql(select, (db_key, raw, time.time())).fetchall()
+        rows = sql(
+            select, (db_key, raw) + scope_args + (time.time(),)
+        ).fetchall()
 
         return bool(rows)
 
@@ -1294,10 +1500,12 @@ class Cache:
 
         """
         db_key, raw = self._disk.put(key)
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid, expire_time, tag, mode, filename, value'
             ' FROM Cache WHERE key = ? AND raw = ?'
-            ' AND (expire_time IS NULL OR expire_time > ?)'
+            + scope_clause
+            + ' AND (expire_time IS NULL OR expire_time > ?)'
         )
 
         if expire_time and tag:
@@ -1306,7 +1514,9 @@ class Cache:
             default = default, None
 
         with self._transact(retry) as (sql, _):
-            rows = sql(select, (db_key, raw, time.time())).fetchall()
+            rows = sql(
+                select, (db_key, raw) + scope_args + (time.time(),)
+            ).fetchall()
 
             if not rows:
                 return default
@@ -1348,11 +1558,13 @@ class Cache:
         db_key, raw = self._disk.put(key)
 
         with self._transact(retry) as (sql, cleanup):
+            scope_clause, scope_args = self._scope_filter()
             rows = sql(
                 'SELECT rowid, filename FROM Cache'
                 ' WHERE key = ? AND raw = ?'
-                ' AND (expire_time IS NULL OR expire_time > ?)',
-                (db_key, raw, time.time()),
+                + scope_clause
+                + ' AND (expire_time IS NULL OR expire_time > ?)',
+                (db_key, raw) + scope_args + (time.time(),),
             ).fetchall()
 
             if not rows:
@@ -1449,14 +1661,18 @@ class Cache:
         size, mode, filename, db_value = self._disk.store(value, read)
         columns = (expire_time, tag, size, mode, filename, db_value)
         order = {'back': 'DESC', 'front': 'ASC'}
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT key FROM Cache'
             ' WHERE ? < key AND key < ? AND raw = ?'
-            ' ORDER BY key %s LIMIT 1'
+            + scope_clause
+            + ' ORDER BY key %s LIMIT 1'
         ) % order[side]
 
         with self._transact(retry, filename) as (sql, cleanup):
-            rows = sql(select, (min_key, max_key, raw)).fetchall()
+            rows = sql(
+                select, (min_key, max_key, raw) + scope_args
+            ).fetchall()
 
             if rows:
                 ((key,),) = rows
@@ -1554,10 +1770,12 @@ class Cache:
             max_key = prefix + '-999999999999999'
 
         order = {'front': 'ASC', 'back': 'DESC'}
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid, key, expire_time, tag, mode, filename, value'
             ' FROM Cache WHERE ? < key AND key < ? AND raw = 1'
-            ' ORDER BY key %s LIMIT 1'
+            + scope_clause
+            + ' ORDER BY key %s LIMIT 1'
         ) % order[side]
 
         if expire_time and tag:
@@ -1568,7 +1786,9 @@ class Cache:
         while True:
             while True:
                 with self._transact(retry) as (sql, cleanup):
-                    rows = sql(select, (min_key, max_key)).fetchall()
+                    rows = sql(
+                        select, (min_key, max_key) + scope_args
+                    ).fetchall()
 
                     if not rows:
                         return default
@@ -1669,10 +1889,12 @@ class Cache:
             max_key = prefix + '-999999999999999'
 
         order = {'front': 'ASC', 'back': 'DESC'}
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid, key, expire_time, tag, mode, filename, value'
             ' FROM Cache WHERE ? < key AND key < ? AND raw = 1'
-            ' ORDER BY key %s LIMIT 1'
+            + scope_clause
+            + ' ORDER BY key %s LIMIT 1'
         ) % order[side]
 
         if expire_time and tag:
@@ -1683,7 +1905,9 @@ class Cache:
         while True:
             while True:
                 with self._transact(retry) as (sql, cleanup):
-                    rows = sql(select, (min_key, max_key)).fetchall()
+                    rows = sql(
+                        select, (min_key, max_key) + scope_args
+                    ).fetchall()
 
                     if not rows:
                         return default
@@ -1742,15 +1966,18 @@ class Cache:
 
         """
         order = ('ASC', 'DESC')
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid, key, raw, expire_time, tag, mode, filename, value'
-            ' FROM Cache ORDER BY rowid %s LIMIT 1'
+            ' FROM Cache WHERE 1 = 1'
+            + scope_clause
+            + ' ORDER BY rowid %s LIMIT 1'
         ) % order[last]
 
         while True:
             while True:
                 with self._transact(retry) as (sql, cleanup):
-                    rows = sql(select).fetchall()
+                    rows = sql(select, scope_args).fetchall()
 
                     if not rows:
                         raise KeyError('dictionary is empty')
@@ -2063,12 +2290,14 @@ class Cache:
         :raises Timeout: if database timeout occurs
 
         """
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid, filename FROM Cache'
             ' WHERE tag = ? AND rowid > ?'
-            ' ORDER BY rowid LIMIT ?'
+            + scope_clause
+            + ' ORDER BY rowid LIMIT ?'
         )
-        args = [tag, 0, 100]
+        args = [tag, 0] + list(scope_args) + [100]
         return self._select_delete(select, args, arg_index=1, retry=retry)
 
     def expire(self, now=None, retry=False):
@@ -2090,12 +2319,14 @@ class Cache:
         :raises Timeout: if database timeout occurs
 
         """
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid, expire_time, filename FROM Cache'
             ' WHERE ? < expire_time AND expire_time < ?'
-            ' ORDER BY expire_time LIMIT ?'
+            + scope_clause
+            + ' ORDER BY expire_time LIMIT ?'
         )
-        args = [0, now or time.time(), 100]
+        args = [0, now or time.time()] + list(scope_args) + [100]
         return self._select_delete(select, args, row_index=1, retry=retry)
 
     def cull(self, retry=False):
@@ -2129,12 +2360,17 @@ class Cache:
         if select_policy is None:
             return 0
 
-        select_filename = select_policy.format(fields='filename', now=now)
+        _, scope_args = self._scope_filter()
+        select_filename = self._scope_cull_query(
+            select_policy, fields='filename', now=now
+        )
 
         try:
             while self.volume() > self.size_limit:
                 with self._transact(retry) as (sql, cleanup):
-                    rows = sql(select_filename, (10,)).fetchall()
+                    rows = sql(
+                        select_filename, scope_args + (10,)
+                    ).fetchall()
 
                     if not rows:
                         break
@@ -2142,9 +2378,11 @@ class Cache:
                     count += len(rows)
                     delete = (
                         'DELETE FROM Cache WHERE rowid IN (%s)'
-                        % select_policy.format(fields='rowid', now=now)
+                        % self._scope_cull_query(
+                            select_policy, fields='rowid', now=now
+                        )
                     )
-                    sql(delete, (10,))
+                    sql(delete, scope_args + (10,))
 
                     for (filename,) in rows:
                         cleanup(filename)
@@ -2171,12 +2409,14 @@ class Cache:
         :raises Timeout: if database timeout occurs
 
         """
+        scope_clause, scope_args = self._scope_filter()
         select = (
             'SELECT rowid, filename FROM Cache'
             ' WHERE rowid > ?'
-            ' ORDER BY rowid LIMIT ?'
+            + scope_clause
+            + ' ORDER BY rowid LIMIT ?'
         )
-        args = [0, 100]
+        args = [0] + list(scope_args) + [100]
         return self._select_delete(select, args, retry=retry)
 
     def _select_delete(
@@ -2223,29 +2463,34 @@ class Cache:
         sql = self._sql
         limit = 100
         _disk_get = self._disk.get
+        scope_clause, scope_args = self._scope_filter()
 
         if reverse:
             select = (
                 'SELECT key, raw FROM Cache'
-                ' ORDER BY key DESC, raw DESC LIMIT 1'
+                ' WHERE 1 = 1' + scope_clause
+                + ' ORDER BY key DESC, raw DESC LIMIT 1'
             )
             iterate = (
                 'SELECT key, raw FROM Cache'
-                ' WHERE key = ? AND raw < ? OR key < ?'
-                ' ORDER BY key DESC, raw DESC LIMIT ?'
+                ' WHERE (key = ? AND raw < ? OR key < ?)'
+                + scope_clause
+                + ' ORDER BY key DESC, raw DESC LIMIT ?'
             )
         else:
             select = (
                 'SELECT key, raw FROM Cache'
-                ' ORDER BY key ASC, raw ASC LIMIT 1'
+                ' WHERE 1 = 1' + scope_clause
+                + ' ORDER BY key ASC, raw ASC LIMIT 1'
             )
             iterate = (
                 'SELECT key, raw FROM Cache'
-                ' WHERE key = ? AND raw > ? OR key > ?'
-                ' ORDER BY key ASC, raw ASC LIMIT ?'
+                ' WHERE (key = ? AND raw > ? OR key > ?)'
+                + scope_clause
+                + ' ORDER BY key ASC, raw ASC LIMIT ?'
             )
 
-        row = sql(select).fetchall()
+        row = sql(select, scope_args).fetchall()
 
         if row:
             ((key, raw),) = row
@@ -2255,7 +2500,9 @@ class Cache:
         yield _disk_get(key, raw)
 
         while True:
-            rows = sql(iterate, (key, raw, key, limit)).fetchall()
+            rows = sql(
+                iterate, (key, raw, key) + scope_args + (limit,)
+            ).fetchall()
 
             if not rows:
                 break
@@ -2265,7 +2512,11 @@ class Cache:
 
     def _iter(self, ascending=True):
         sql = self._sql
-        rows = sql('SELECT MAX(rowid) FROM Cache').fetchall()
+        scope_clause, scope_args = self._scope_filter()
+        rows = sql(
+            'SELECT MAX(rowid) FROM Cache WHERE 1 = 1' + scope_clause,
+            scope_args,
+        ).fetchall()
         ((max_rowid,),) = rows
         yield  # Signal ready.
 
@@ -2279,14 +2530,15 @@ class Cache:
         select = (
             'SELECT rowid, key, raw FROM Cache'
             ' WHERE ? < rowid AND rowid < ?'
-            ' ORDER BY rowid %s LIMIT ?'
+            + scope_clause
+            + ' ORDER BY rowid %s LIMIT ?'
         ) % ('ASC' if ascending else 'DESC')
 
         while True:
             if ascending:
-                args = (rowid, bound, limit)
+                args = (rowid, bound) + scope_args + (limit,)
             else:
-                args = (0, rowid, limit)
+                args = (0, rowid) + scope_args + (limit,)
 
             rows = sql(select, args).fetchall()
 
@@ -2311,12 +2563,33 @@ class Cache:
     def stats(self, enable=True, reset=False):
         """Return cache statistics hits and misses.
 
+        Scoped views report only the hits and misses recorded for their scope.
+
         :param bool enable: enable collecting statistics (default True)
         :param bool reset: reset hits and misses to 0 (default False)
         :return: (hits, misses)
 
         """
         # pylint: disable=E0203,W0201
+        if self._scope is not None:
+            sql = self._sql
+            select = (
+                'SELECT hits, misses FROM ScopeStats WHERE scope IS ?'
+            )
+            rows = sql(select, (self._scope_token,)).fetchall()
+            result = rows[0] if rows else (0, 0)
+
+            if reset:
+                sql(
+                    'INSERT INTO ScopeStats(scope, hits, misses)'
+                    ' VALUES (?, 0, 0)'
+                    ' ON CONFLICT(scope) DO UPDATE SET hits = 0, misses = 0',
+                    (self._scope_token,),
+                )
+
+            self.reset('statistics', enable)
+            return result
+
         result = (self.reset('hits'), self.reset('misses'))
 
         if reset:
@@ -2327,14 +2600,31 @@ class Cache:
 
         return result
 
+    def _scoped_volume(self):
+        """Return total size of file-backed items visible to this cache."""
+        scope_clause, scope_args = self._scope_filter()
+        ((size,),) = self._sql(
+            'SELECT COALESCE(SUM(size), 0) FROM Cache WHERE 1 = 1'
+            + scope_clause,
+            scope_args,
+        ).fetchall()
+        return size
+
     def volume(self):
         """Return estimated total size of cache on disk.
+
+        Scoped views report the size of file-backed items stored under their
+        scope. Values stored directly in the database are reported as zero
+        bytes because their footprint cannot be attributed per scope.
 
         :return: size in bytes
 
         """
+        size = self._scoped_volume()
+        if self._scope is not None:
+            return size
         ((page_count,),) = self._sql('PRAGMA page_count').fetchall()
-        total_size = self._page_size * page_count + self.reset('size')
+        total_size = self._page_size * page_count + size
         return total_size
 
     def close(self):
@@ -2362,12 +2652,19 @@ class Cache:
 
     def __len__(self):
         """Count of items in cache including expired items."""
-        return self.reset('count')
+        scope_clause, scope_args = self._scope_filter()
+        ((count,),) = self._sql(
+            'SELECT COUNT(key) FROM Cache WHERE 1 = 1' + scope_clause,
+            scope_args,
+        ).fetchall()
+        return count
 
     def __getstate__(self):
-        return (self.directory, self.timeout, type(self.disk))
+        return (self.directory, self.timeout, type(self.disk), self._scope)
 
     def __setstate__(self, state):
+        if len(state) == 3:  # Backward compatibility with unscoped pickles.
+            state = state + (None,)
         self.__init__(*state)
 
     def reset(self, key, value=ENOVAL, update=True):

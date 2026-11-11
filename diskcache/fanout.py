@@ -17,7 +17,13 @@ class FanoutCache:
     """Cache that shards keys and values."""
 
     def __init__(
-        self, directory=None, shards=8, timeout=0.010, disk=Disk, **settings
+        self,
+        directory=None,
+        shards=8,
+        timeout=0.010,
+        disk=Disk,
+        scope=None,
+        **settings,
     ):
         """Initialize cache instance.
 
@@ -25,6 +31,9 @@ class FanoutCache:
         :param int shards: number of shards to distribute writes
         :param float timeout: SQLite connection timeout
         :param disk: `Disk` instance for serialization
+        :param scope: tenant identifier; when not None, the cache acts as a
+            scoped view and only items written through this or another view of
+            the same scope are visible (default None, unscoped legacy cache)
         :param settings: any of `DEFAULT_SETTINGS`
 
         """
@@ -34,17 +43,22 @@ class FanoutCache:
         directory = op.expanduser(directory)
         directory = op.expandvars(directory)
 
+        if scope is not None:
+            scope = Cache.validate_scope(scope)
+
         default_size_limit = DEFAULT_SETTINGS['size_limit']
         size_limit = settings.pop('size_limit', default_size_limit) / shards
 
         self._count = shards
         self._directory = directory
         self._disk = disk
+        self._scope = scope
         self._shards = tuple(
             Cache(
                 directory=op.join(directory, '%03d' % num),
                 timeout=timeout,
                 disk=disk,
+                scope=scope,
                 size_limit=size_limit,
                 **settings,
             )
@@ -59,6 +73,37 @@ class FanoutCache:
     def directory(self):
         """Cache directory."""
         return self._directory
+
+    @property
+    def scope(self):
+        """Scope of the cache view, or None for an unscoped cache."""
+        return self._scope
+
+    def view(self, scope):
+        """Return a scoped view of the fanout cache for tenant `scope`.
+
+        The view shares the same directory and shard databases. Reads, writes,
+        iteration, tag-based eviction, and statistics through the view only
+        consider items stored under the same scope. Identical keys and tags may
+        exist independently in different scopes.
+
+        Items written through unscoped caches are not migrated into views and
+        remain visible only through the unscoped interface.
+
+        :param scope: tenant identifier for the view
+        :return: FanoutCache view restricted to `scope`
+
+        """
+        scope = Cache.validate_scope(scope)
+        view = self.__class__.__new__(self.__class__)
+        view.__dict__.update(self.__dict__)
+        view._scope = scope
+        view._shards = tuple(shard.view(scope) for shard in self._shards)
+        view._hash = view._shards[0].disk.hash
+        view._caches = {}
+        view._deques = {}
+        view._indexes = {}
+        return view
 
     def __getattr__(self, name):
         safe_names = {'timeout', 'disk'}
@@ -527,9 +572,17 @@ class FanoutCache:
         self.close()
 
     def __getstate__(self):
-        return (self._directory, self._count, self.timeout, type(self.disk))
+        return (
+            self._directory,
+            self._count,
+            self.timeout,
+            type(self.disk),
+            self._scope,
+        )
 
     def __setstate__(self, state):
+        if len(state) == 4:  # Backward compatibility with unscoped pickles.
+            state = state + (None,)
         self.__init__(*state)
 
     def __iter__(self):
@@ -608,6 +661,7 @@ class FanoutCache:
                 directory=directory,
                 timeout=timeout,
                 disk=self._disk if disk is None else Disk,
+                scope=self._scope,
                 **settings,
             )
             _caches[name] = temp
@@ -642,6 +696,7 @@ class FanoutCache:
                 directory=directory,
                 disk=self._disk,
                 eviction_policy='none',
+                scope=self._scope,
             )
             deque = Deque.fromcache(cache, maxlen=maxlen)
             _deques[name] = deque
@@ -678,6 +733,7 @@ class FanoutCache:
                 directory=directory,
                 disk=self._disk,
                 eviction_policy='none',
+                scope=self._scope,
             )
             index = Index.fromcache(cache)
             _indexes[name] = index

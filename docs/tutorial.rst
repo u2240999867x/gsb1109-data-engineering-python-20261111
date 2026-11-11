@@ -390,6 +390,73 @@ deleted manually.
 
 To permanently delete the cache, recursively remove the cache's directory.
 
+.. _tutorial-scoped-views:
+
+Scoped Views
+------------
+
+When multiple applications share a cache directory, use :meth:`view
+<diskcache.Cache.view>` to create an explicit tenant scope. Reads, writes,
+iteration, tag-based eviction, and statistics performed through the view only
+observe items stored under that scope. The same key and tag may exist
+independently in different scopes.
+
+    >>> cache = Cache()
+    >>> alpha = cache.view('alpha')
+    >>> beta = cache.view('beta')
+    >>> alpha['key'] = 'alpha value'
+    >>> beta['key'] = 'beta value'
+    >>> alpha['key']
+    'alpha value'
+    >>> beta['key']
+    'beta value'
+    >>> cache.get('key') is None
+    True
+    >>> list(alpha)
+    ['key']
+    >>> len(alpha), len(beta), len(cache)
+    (1, 1, 0)
+
+Tags are scoped too, so evicting from one view never removes items from
+another view or from the unscoped legacy interface.
+
+    >>> _ = alpha.set('tagged', 1, tag='shared')
+    >>> _ = beta.set('tagged', 2, tag='shared')
+    >>> alpha.evict('shared')
+    1
+    >>> beta.get('tagged')
+    2
+    >>> beta.evict('shared')
+    1
+
+Statistics are recorded per scope.
+
+    >>> alpha.stats(enable=True)
+    (0, 0)
+    >>> alpha.get('missing')
+    >>> alpha.stats(enable=False)
+    (0, 1)
+    >>> beta.stats(enable=False)
+    (0, 0)
+
+The unscoped interface behaves as a legacy scope. Items written through views
+are not migrated into it, and existing items in a cache directory are not
+migrated into views. Each tenant should perform its reads and writes through
+its own view.
+
+    >>> _ = alpha.clear()
+    >>> len(alpha)
+    0
+    >>> cache.close()
+    >>> try:
+    ...     shutil.rmtree(cache.directory)
+    ... except OSError:  # Windows wonkiness
+    ...     pass
+
+:class:`diskcache.FanoutCache` supports the same convention with
+:meth:`view <diskcache.FanoutCache.view>`. All shards are filtered to the same
+scope, and helper caches, deques, and indexes created from a view inherit it.
+
 .. _tutorial-fanoutcache:
 
 FanoutCache
