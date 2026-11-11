@@ -37,6 +37,7 @@ Python iterables.
 |                        | `substrings <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.substrings>`_,                                                                         |
 |                        | `substrings_indexes <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.substrings_indexes>`_,                                                         |
 |                        | `stagger <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.stagger>`_,                                                                               |
+|                        | `lagged <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.lagged>`_,                                                                                 |
 |                        | `windowed_complete <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.windowed_complete>`_,                                                           |
 |                        | `pairwise <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.pairwise>`_,                                                                             |
 |                        | `triplewise <https://more-itertools.readthedocs.io/en/stable/api.html#more_itertools.triplewise>`_,                                                                         |

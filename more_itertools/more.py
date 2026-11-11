@@ -113,6 +113,7 @@ __all__ = [
     'iter_suppress',
     'iterate',
     'join_mappings',
+    'lagged',
     'last',
     'locate',
     'longest_common_prefix',
@@ -275,6 +276,45 @@ def first(iterable, default=_marker):
             'and no default value was provided.'
         )
     return default
+
+
+def lagged(iterable, *lags, fillvalue=_marker):
+    """Yield ``(index, item, history)`` tuples for each item in *iterable*.
+
+    *index* is the position of *item* in the input, and *history* is a
+    tuple with one entry per lag in *lags*, holding the item that appeared
+    that many positions before the current one:
+
+        >>> list(lagged(['a', 'b', 'c'], 1, 2, fillvalue='-'))
+        [(0, 'a', ('-', '-')), (1, 'b', ('a', '-')), (2, 'c', ('b', 'a'))]
+
+    The input is read exactly once, one item at a time, no matter how many
+    lags are given or how they are ordered - only the most recent
+    ``max(lags)`` items are kept in memory. This makes the function
+    suitable for quality checks that compare each record against several
+    predecessors at once, e.g. ``lagged(records, 1, 7, 30)``.
+
+    Positions without enough history are filled with *fillvalue*, which
+    defaults to a unique sentinel. This keeps "not enough history yet"
+    distinct from historical values that are themselves ``None``:
+
+        >>> list(lagged([10, None, 30], 1, fillvalue='no data'))
+        [(0, 10, ('no data',)), (1, None, (10,)), (2, 30, (None,))]
+
+    Every emitted tuple has the same shape, so results line up record by
+    record for later comparison.
+    """
+    if not lags:
+        raise ValueError('at least one lag must be provided')
+    if any(lag < 1 for lag in lags):
+        raise ValueError('lags must be positive integers')
+
+    depth = max(lags)
+    window = deque(repeat(fillvalue, depth), maxlen=depth)
+    for index, item in enumerate(iterable):
+        history = tuple(window[-lag] for lag in lags)
+        window.append(item)
+        yield index, item, history
 
 
 def last(iterable, default=_marker):

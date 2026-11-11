@@ -159,6 +159,84 @@ class IterOnlyRange:
         return iter(range(self.n))
 
 
+class LaggedTests(TestCase):
+    def test_basic(self):
+        self.assertEqual(
+            list(mi.lagged(['a', 'b', 'c'], 1, 2, fillvalue='-')),
+            [
+                (0, 'a', ('-', '-')),
+                (1, 'b', ('a', '-')),
+                (2, 'c', ('b', 'a')),
+            ],
+        )
+
+    def test_quality_check_lags(self):
+        data = list(range(40))
+        for index, item, (lag_1, lag_7, lag_30) in mi.lagged(
+            data, 1, 7, 30, fillvalue=None
+        ):
+            self.assertEqual(item, data[index])
+            self.assertEqual(lag_1, data[index - 1] if index >= 1 else None)
+            self.assertEqual(lag_7, data[index - 7] if index >= 7 else None)
+            self.assertEqual(lag_30, data[index - 30] if index >= 30 else None)
+
+    def test_fixed_shape(self):
+        for result in mi.lagged(range(5), 1, 7, 30):
+            self.assertEqual(len(result), 3)
+            self.assertEqual(len(result[2]), 3)
+
+    def test_default_fillvalue_is_unique_sentinel(self):
+        (first, second) = mi.lagged([None, None], 1)
+        self.assertIsNone(first[1])
+        self.assertIsNotNone(first[2][0])
+        self.assertIsNone(second[2][0])
+        self.assertIsNot(first[2][0], second[2][0])
+
+    def test_missing_history_vs_none_history(self):
+        actual = list(mi.lagged([None, None], 1, fillvalue='missing'))
+        self.assertEqual(actual[0], (0, None, ('missing',)))
+        self.assertEqual(actual[1], (1, None, (None,)))
+
+    def test_single_pass_regardless_of_lag_order(self):
+        def counting_iterable(n, counter):
+            for i in range(n):
+                counter[0] += 1
+                yield i
+
+        read_counts = []
+        for lags in [(1, 7, 30), (30, 7, 1)]:
+            counter = [0]
+            for _ in mi.lagged(counting_iterable(40, counter), *lags):
+                pass
+            read_counts.append(counter[0])
+        self.assertEqual(read_counts, [40, 40])
+
+    def test_reads_match_consumption(self):
+        counter = [0]
+
+        def gen():
+            for i in range(10):
+                counter[0] += 1
+                yield i
+
+        it = mi.lagged(gen(), 30, 7, 1)
+        self.assertEqual(counter[0], 0)
+        next(it)
+        self.assertEqual(counter[0], 1)
+
+    def test_empty_iterable(self):
+        self.assertEqual(list(mi.lagged([], 1, 7, 30)), [])
+
+    def test_no_lags(self):
+        with self.assertRaises(ValueError):
+            list(mi.lagged([1, 2, 3]))
+
+    def test_non_positive_lags(self):
+        for lag in (0, -1):
+            with self.assertRaises(ValueError):
+                list(mi.lagged([1, 2, 3], lag))
+
+
 class LastTests(TestCase):
     def test_basic(self):
         cases = [

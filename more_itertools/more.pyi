@@ -86,6 +86,7 @@ __all__ = [
     'iter_suppress',
     'iterate',
     'join_mappings',
+    'lagged',
     'last',
     'locate',
     'longest_common_prefix',
@@ -181,6 +182,14 @@ def chunked(
 def first(iterable: Iterable[_T]) -> _T: ...
 @overload
 def first(iterable: Iterable[_T], default: _U) -> _T | _U: ...
+@overload
+def lagged(
+    iterable: Iterable[_T], *lags: int
+) -> Iterator[tuple[int, _T, tuple[_T | object, ...]]]: ...
+@overload
+def lagged(
+    iterable: Iterable[_T], *lags: int, fillvalue: _U
+) -> Iterator[tuple[int, _T, tuple[_T | _U, ...]]]: ...
 @overload
 def last(iterable: Iterable[_T]) -> _T: ...
 @overload
