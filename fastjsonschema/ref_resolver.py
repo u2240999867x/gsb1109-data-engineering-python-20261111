@@ -105,6 +105,9 @@ class RefResolver:
         self.store = store
         self.cache = cache
         self.handlers = handlers
+        # Remote schemas really fetched while resolving, keyed by normalized URI.
+        # Used to build a self-contained manifest of everything compiled in.
+        self.resolved_remote: dict[str, Any] = {}
         self._walked_uris: set[str] = set()
         self.walk(schema)
         self._walked_uris.add(normalize(base_uri) if base_uri else '')
@@ -155,6 +158,7 @@ class RefResolver:
             schema = self.schema
         else:
             schema = resolve_remote(uri, self.handlers)
+            self.resolved_remote[normalize(uri)] = schema
             if self.cache:
                 self.store[normalize(uri)] = schema
 

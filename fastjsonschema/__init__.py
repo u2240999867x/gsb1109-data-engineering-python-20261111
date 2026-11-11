@@ -102,6 +102,17 @@ Usage
     except fastjsonschema.JsonSchemaException as e:
         print(f"Data failed validation: {e}")
 
+When the generated code is shipped to an offline worker, you can generate a
+companion manifest recording the effective schema, all fetched remote
+references, formats and compile options, and verify the deployment against
+it before running:
+
+.. code-block:: python
+
+    code, manifest = fastjsonschema.compile_to_code_with_manifest(point_schema)
+    # ... deploy code and manifest ...
+    fastjsonschema.verify_manifest(manifest, code)  # offline, data-only check
+
 API
 ***
 """
@@ -119,6 +130,7 @@ from .exceptions import (
     JsonSchemaValuesException,
     JsonSchemaDefinitionException,
 )
+from .manifest import create_manifest, verify_manifest
 from .ref_resolver import RefResolver
 from .version import VERSION
 
@@ -131,6 +143,9 @@ __all__ = (
     'validate',
     'compile',
     'compile_to_code',
+    'compile_with_manifest',
+    'compile_to_code_with_manifest',
+    'verify_manifest',
 )
 
 
@@ -342,10 +357,118 @@ def compile_to_code(
         detailed_exceptions,
         fast_fail,
     )
+    return _code_string(code_generator)
+
+
+# pylint: disable=dangerous-default-value
+def compile_with_manifest(
+    definition: Definition,
+    handlers: Handlers = {},
+    formats: Formats = {},
+    use_default: bool = True,
+    use_formats: bool = True,
+    detailed_exceptions: bool = True,
+    fast_fail: bool = True,
+) -> tuple[Validator, dict]:
+    """
+    Like :any:`compile`, but returns a tuple ``(validator, manifest)``.
+
+    The manifest is a JSON-serializable companion document recording what
+    really went into the compiled validator: the effective root schema, every
+    remote reference fetched while compiling (embedded with its content, not
+    only a digest of the root schema), the formats in effect and the compile
+    options. Ship it next to the validator so the deployment contract can be
+    checked with :any:`verify_manifest` before the validator runs. The
+    manifest is pure data -- it never instructs the worker to download or
+    execute anything.
+    """
+    resolver, code_generator = _factory(
+        definition,
+        handlers,
+        formats,
+        use_default,
+        use_formats,
+        detailed_exceptions,
+        fast_fail,
+    )
+    code = _code_string(code_generator)
+    manifest = _manifest_for(
+        definition, resolver, code_generator, code, formats,
+        use_default, use_formats, detailed_exceptions, fast_fail,
+    )
+    global_state = code_generator.global_state
+    # Do not pass local state so it can recursively call itself.
+    exec(code_generator.func_code, global_state)
+    func = global_state[resolver.get_scope_name()]
+    if formats:
+        func = update_wrapper(partial(func, custom_formats=formats), func)
+    return func, manifest
+
+
+# pylint: disable=dangerous-default-value
+def compile_to_code_with_manifest(
+    definition: Definition,
+    handlers: Handlers = {},
+    formats: Formats = {},
+    use_default: bool = True,
+    use_formats: bool = True,
+    detailed_exceptions: bool = True,
+    fast_fail: bool = True,
+) -> tuple[str, dict]:
+    """
+    Like :any:`compile_to_code`, but returns a tuple ``(code, manifest)``;
+    see :any:`compile_with_manifest` for what the manifest contains. The
+    generated code is unchanged and runs standalone -- it does not read the
+    manifest at runtime.
+    """
+    resolver, code_generator = _factory(
+        definition,
+        handlers,
+        formats,
+        use_default,
+        use_formats,
+        detailed_exceptions,
+        fast_fail,
+    )
+    code = _code_string(code_generator)
+    manifest = _manifest_for(
+        definition, resolver, code_generator, code, formats,
+        use_default, use_formats, detailed_exceptions, fast_fail,
+    )
+    return code, manifest
+
+
+def _code_string(code_generator: CodeGeneratorDraft04) -> str:
     return (
         'VERSION = "' + VERSION + '"\n' +
         code_generator.global_state_code + '\n' +
         code_generator.func_code
+    )
+
+
+def _manifest_for(
+    definition: Definition,
+    resolver: RefResolver,
+    code_generator: CodeGeneratorDraft04,
+    code: str,
+    formats: Formats,
+    use_default: bool,
+    use_formats: bool,
+    detailed_exceptions: bool,
+    fast_fail: bool,
+) -> dict:
+    return create_manifest(
+        definition,
+        resolver,
+        code,
+        dict(formats),
+        options={
+            'use_default': use_default,
+            'use_formats': use_formats,
+            'detailed_exceptions': detailed_exceptions,
+            'fast_fail': fast_fail,
+        },
+        generator_name=type(code_generator).__name__,
     )
 
 
