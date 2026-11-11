@@ -456,6 +456,16 @@ def test_fallback():
         assert e is bad_exc
 
 
+def _remap_exploding_key(key):
+    raise RuntimeError('key exploded')
+
+
+def _remap_multi_key(key):
+    if key == 'badkey':
+        raise RuntimeError('key exploded')
+    return key.replace('-', '').replace('_', '').lower()
+
+
 def test_all_public_errors():
     """test that all errors importable from the top-level glom module
     pass a basic set of standards.
@@ -502,6 +512,17 @@ def test_all_public_errors():
     _test_exc(MatchError, 1, M == 2)
 
     _test_exc(TypeMatchError, 1, Match(str))
+
+    _test_exc(glom.KeyTransformError, {'A-01': 1}, glom.Remap(key=_remap_exploding_key))
+
+    _test_exc(glom.ValueTransformError, {'A-01': 'bad'}, glom.Remap(value=int))
+
+    _test_exc(glom.KeyCollisionError, {'A-01': 1, 'a01': 2},
+              glom.Remap(key=_remap_multi_key))
+
+    _test_exc(glom.RemapError,
+              {'A-01': 'bad', 'a01': 2, 'badkey': 3},
+              glom.Remap(key=_remap_multi_key, value=int))
 
     for (target, spec, exc) in results:
         assert copy.copy(exc) is not exc

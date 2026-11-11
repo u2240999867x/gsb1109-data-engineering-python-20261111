@@ -12,6 +12,16 @@ The glom team's approach to updates can be summed up as:
 Check this page when upgrading, we strive to keep the updates
 summarized and well-linked.
 
+## Unreleased
+
+- Add `Remap` specifier and `remap()` convenience function for
+  normalizing mapping keys (and optionally values) with explicit
+  collision handling: `REJECT`, `COLLECT`, or caller-supplied `MERGE`.
+  Key-transform and value-transform failures raise distinct error
+  types (`KeyTransformError`, `ValueTransformError`), keep the original
+  key, and multiple failures in one pass are aggregated into a single
+  `RemapError`.
+
 ## 25.12.0
 
 _(December 28, 2025)_

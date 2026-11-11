@@ -18,6 +18,7 @@ Core ``glom`` API
       :columns: 2
 
       * :doc:`mutation`
+      * :doc:`remap`
       * :doc:`streaming`
       * :doc:`grouping`
       * :doc:`matching`
@@ -63,6 +64,7 @@ types that can be used with the basic set of Python builtins.
       :columns: 2
 
       * :doc:`mutation`
+      * :doc:`remap`
       * :doc:`streaming`
       * :doc:`grouping`
       * :doc:`matching`
