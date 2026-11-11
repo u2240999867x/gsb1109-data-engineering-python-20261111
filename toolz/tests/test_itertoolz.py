@@ -13,6 +13,7 @@ from toolz.itertoolz import (remove, groupby, merge_sorted,
                              reduceby, iterate, accumulate,
                              sliding_window, count, partition,
                              partition_all, take_nth, pluck, join,
+                             JoinBudgetExceeded,
                              diff, topk, peek, peekn, random_sample)
 from operator import add, mul
 
@@ -495,6 +496,95 @@ def test_outer_join():
     expected = {(2, 2), (1, None), (None, 3)}
 
     assert result == expected
+
+
+def test_join_max_output_inner():
+    left = [('bad', i) for i in range(3)] + [('ok', 'L')]
+    right = [('bad', i) for i in range(3)] + [('ok', 'R')]
+
+    # A budget that fits everything behaves like an unbudgeted join
+    full = list(join(first, left, first, right))
+    assert len(full) == 10
+    assert list(join(first, left, first, right, max_output=10)) == full
+    assert list(join(first, left, first, right, max_output=100)) == full
+
+    # The explosive 'bad' key blows the budget: explicit, incomplete end
+    gen = join(first, left, first, right, max_output=4)
+    collected = []
+    try:
+        for pair in gen:
+            collected.append(pair)
+        assert False, 'expected JoinBudgetExceeded'
+    except JoinBudgetExceeded as e:
+        assert e.key == 'bad'
+        assert e.left_count == 3
+        assert e.right_count == 2
+        assert e.max_output == 4
+        assert e.emitted == 3
+        assert 'bad' in str(e)
+        assert 'incomplete' in str(e)
+
+    # Already-yielded pairs keep stable order and stop on a key boundary:
+    # exactly the first complete key group of the unbudgeted result
+    assert collected == full[:3]
+
+
+def test_join_max_output_explosive_key():
+    left = [('bad', i) for i in range(1000)]
+    right = [('bad', i) for i in range(1000)]
+
+    gen = join(first, left, first, right, max_output=5000)
+    count = 0
+    try:
+        for _ in gen:
+            count += 1
+        assert False, 'expected JoinBudgetExceeded'
+    except JoinBudgetExceeded as e:
+        assert e.key == 'bad'
+        assert e.left_count == 1000
+        assert e.right_count == 6
+        assert count == e.emitted == 5000
+
+
+def test_join_max_output_exact_and_zero():
+    left = [(1, 'a')]
+    right = [(1, 'b')]
+    assert list(join(first, left, first, right, max_output=1)) == \
+        [((1, 'a'), (1, 'b'))]
+    assert raises(JoinBudgetExceeded,
+                  lambda: list(join(first, left, first, right, max_output=0)))
+    assert raises(ValueError,
+                  lambda: list(join(first, left, first, right,
+                                    max_output=-1)))
+
+
+def test_join_max_output_outer_joins():
+    # Right join: unmatched right rows count against the budget
+    result = list(join(identity, [1, 2], identity, [2, 3],
+                       left_default=None, max_output=2))
+    assert result == [(2, 2), (None, 3)]
+
+    gen = join(identity, [1, 2], identity, [2, 3],
+               left_default=None, max_output=1)
+    assert next(gen) == (2, 2)
+    assert raises(JoinBudgetExceeded, lambda: next(gen))
+
+    # Left join
+    result = list(join(identity, [1, 2], identity, [2, 3],
+                       right_default=None, max_output=2))
+    assert result == [(2, 2), (1, None)]
+
+    # Full join: the left-only tail reports right_count 0
+    gen = join(identity, [1, 2], identity, [2],
+               left_default=None, right_default=None, max_output=1)
+    assert next(gen) == (2, 2)
+    try:
+        next(gen)
+        assert False, 'expected JoinBudgetExceeded'
+    except JoinBudgetExceeded as e:
+        assert e.key == 1
+        assert e.left_count == 1
+        assert e.right_count == 0
 
 
 def test_diff():

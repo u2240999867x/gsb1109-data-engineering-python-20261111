@@ -27,6 +27,7 @@ Itertoolz
    isiterable
    iterate
    join
+   JoinBudgetExceeded
    last
    mapcat
    merge_sorted

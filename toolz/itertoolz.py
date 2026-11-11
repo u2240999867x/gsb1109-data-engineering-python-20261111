@@ -13,7 +13,8 @@ __all__ = ('remove', 'accumulate', 'groupby', 'merge_sorted', 'interleave',
            'first', 'second', 'nth', 'last', 'get', 'concat', 'concatv',
            'mapcat', 'cons', 'interpose', 'frequencies', 'reduceby', 'iterate',
            'sliding_window', 'partition', 'partition_all', 'count', 'pluck',
-           'join', 'tail', 'diff', 'topk', 'peek', 'peekn', 'random_sample')
+           'join', 'JoinBudgetExceeded', 'tail', 'diff', 'topk', 'peek',
+           'peekn', 'random_sample')
 
 
 def remove(predicate, seq):
@@ -814,8 +815,48 @@ def getter(index):
         return operator.itemgetter(index)
 
 
+class JoinBudgetExceeded(Exception):
+    """ Raised by ``join`` when its ``max_output`` budget would be exceeded
+
+    The join terminates explicitly as incomplete: every result pair yielded
+    before this exception is part of a complete key group, emitted in the
+    same stable order as an unbudgeted join, and no key group is partially
+    emitted or silently skipped.
+
+    Attributes
+    ----------
+    key
+        The join key whose group pushed the join over budget.
+    left_count
+        Number of left-side rows matching ``key``.
+    right_count
+        Number of right-side rows with ``key`` seen so far (zero when the
+        budget is exceeded by an unmatched left key of a full outer join).
+    max_output
+        The configured output budget.
+    emitted
+        Number of result pairs already yielded before termination.
+    """
+
+    def __init__(self, key, left_count, right_count, max_output, emitted):
+        self.key = key
+        self.left_count = left_count
+        self.right_count = right_count
+        self.max_output = max_output
+        self.emitted = emitted
+        super().__init__(key, left_count, right_count, max_output, emitted)
+
+    def __str__(self):
+        return ('join output budget exceeded: result is incomplete; '
+                'key %r has %d left and %d right match(es) and would push '
+                'the output past the budget of %d pair(s) (%d already '
+                'emitted)' % (self.key, self.left_count, self.right_count,
+                              self.max_output, self.emitted))
+
+
 def join(leftkey, leftseq, rightkey, rightseq,
-         left_default=no_default, right_default=no_default):
+         left_default=no_default, right_default=no_default,
+         max_output=None):
     """ Join two sequences on common attributes
 
     This is a semi-streaming operation.  The LEFT sequence is fully evaluated
@@ -873,6 +914,28 @@ def join(leftkey, leftseq, rightkey, rightseq,
 
     >>> # result = join(second, friends, first, cities)
     >>> result = join(1, friends, 0, cities)  # doctest: +SKIP
+
+    An optional output budget ``max_output`` guards against explosive keys
+    (e.g. a bad key with hundreds of thousands of rows on both sides, whose
+    product would flood the result).  When emitting the next key's group of
+    pairs would push the total number of emitted pairs past ``max_output``,
+    the join raises ``JoinBudgetExceeded`` instead.  The exception names the
+    offending key and its match counts on both sides.  Pairs yielded before
+    the exception keep their normal order and form complete key groups; no
+    key is ever half-emitted and then skipped while the join carries on as
+    if it had succeeded.  The default ``max_output=None`` leaves the join
+    unbudgeted and behaves exactly as before.
+
+    >>> left = [('bad', i) for i in range(3)]
+    >>> right = [('bad', i) for i in range(3)] + [('ok', 1)]
+    >>> result = join(first, left, first, right, max_output=4)
+    >>> next(result)
+    (('bad', 0), ('bad', 0))
+    >>> try:  # the 'bad' x 'bad' product does not fit in the budget
+    ...     list(result)
+    ... except JoinBudgetExceeded as e:
+    ...     print(e.key, e.left_count, e.right_count)
+    bad 3 2
     """
     if not callable(leftkey):
         leftkey = getter(leftkey)
@@ -880,6 +943,97 @@ def join(leftkey, leftseq, rightkey, rightseq,
         rightkey = getter(rightkey)
 
     d = groupby(leftkey, leftseq)
+
+    if max_output is not None:
+        if max_output < 0:
+            raise ValueError('max_output must be non-negative or None')
+        emitted = 0
+        right_counts = {}
+
+        if left_default == no_default and right_default == no_default:
+            # Inner Join
+            for item in rightseq:
+                key = rightkey(item)
+                right_counts[key] = n_right = right_counts.get(key, 0) + 1
+                if key in d:
+                    matches = d[key]
+                    if emitted + len(matches) > max_output:
+                        raise JoinBudgetExceeded(
+                            key, len(matches), n_right, max_output, emitted)
+                    for left_match in matches:
+                        yield (left_match, item)
+                    emitted += len(matches)
+        elif left_default != no_default and right_default == no_default:
+            # Right Join
+            for item in rightseq:
+                key = rightkey(item)
+                right_counts[key] = n_right = right_counts.get(key, 0) + 1
+                if key in d:
+                    matches = d[key]
+                    if emitted + len(matches) > max_output:
+                        raise JoinBudgetExceeded(
+                            key, len(matches), n_right, max_output, emitted)
+                    for left_match in matches:
+                        yield (left_match, item)
+                    emitted += len(matches)
+                else:
+                    if emitted + 1 > max_output:
+                        raise JoinBudgetExceeded(
+                            key, 0, n_right, max_output, emitted)
+                    yield (left_default, item)
+                    emitted += 1
+        elif right_default != no_default:
+            seen_keys = set()
+            seen = seen_keys.add
+
+            if left_default == no_default:
+                # Left Join
+                for item in rightseq:
+                    key = rightkey(item)
+                    seen(key)
+                    right_counts[key] = n_right = \
+                        right_counts.get(key, 0) + 1
+                    if key in d:
+                        matches = d[key]
+                        if emitted + len(matches) > max_output:
+                            raise JoinBudgetExceeded(
+                                key, len(matches), n_right,
+                                max_output, emitted)
+                        for left_match in matches:
+                            yield (left_match, item)
+                        emitted += len(matches)
+            else:
+                # Full Join
+                for item in rightseq:
+                    key = rightkey(item)
+                    seen(key)
+                    right_counts[key] = n_right = \
+                        right_counts.get(key, 0) + 1
+                    if key in d:
+                        matches = d[key]
+                        if emitted + len(matches) > max_output:
+                            raise JoinBudgetExceeded(
+                                key, len(matches), n_right,
+                                max_output, emitted)
+                        for left_match in matches:
+                            yield (left_match, item)
+                        emitted += len(matches)
+                    else:
+                        if emitted + 1 > max_output:
+                            raise JoinBudgetExceeded(
+                                key, 0, n_right, max_output, emitted)
+                        yield (left_default, item)
+                        emitted += 1
+
+            for key, matches in d.items():
+                if key not in seen_keys:
+                    if emitted + len(matches) > max_output:
+                        raise JoinBudgetExceeded(
+                            key, len(matches), 0, max_output, emitted)
+                    for match in matches:
+                        yield (match, right_default)
+                    emitted += len(matches)
+        return
 
     if left_default == no_default and right_default == no_default:
         # Inner Join
