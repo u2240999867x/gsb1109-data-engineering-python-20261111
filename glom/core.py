@@ -1026,8 +1026,11 @@ class Inspect:
             # TODO: switch from scope[Path] to the Target-Spec format trace above
             # ... but maybe be smart about only printing deltas instead of the whole
             # thing
-            print('path:  ', scope[Path] + [spec])
-            print('target:', target)
+            # bbrepr (reprlib-based) degrades to an "<X instance at ...>"
+            # placeholder instead of raising when a value's __repr__ fails,
+            # so echoing must never change the result or mask a real error
+            print('path:  ', bbrepr(scope[Path] + [spec]))
+            print('target:', bbrepr(target))
         if self.breakpoint:
             # TODO: real debugger here?
             self.breakpoint()
@@ -1038,7 +1041,7 @@ class Inspect:
                 self.post_mortem()
             raise
         if self.echo:
-            print('output:', ret)
+            print('output:', bbrepr(ret))
             print('---')
         return ret
 
