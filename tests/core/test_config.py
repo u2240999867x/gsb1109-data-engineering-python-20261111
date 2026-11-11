@@ -146,7 +146,7 @@ def test_from_dict_with_missing_forward_reference():
     with pytest.raises(ForwardReferenceError) as exception_info:
         from_dict(X, {"y": {"s": "text"}})
 
-    assert str(exception_info.value) == "can not resolve forward reference: name 'Y' is not defined"
+    assert str(exception_info.value) == 'can not resolve forward reference: "Y" in field "y"'
     assert exception_info._excinfo[1].__suppress_context__
 
 

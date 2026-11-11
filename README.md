@@ -365,8 +365,13 @@ assert result == A(e=E.X)
 ### Forward References
 
 Definition of forward references can be passed as a `{'name': Type}` mapping to 
-`Config.forward_references`. This dict is passed to `typing.get_type_hints()` as the 
-`globalns` param when evaluating each field's type.
+`Config.forward_references`. This mapping is a *local resolution context*: it is
+passed to `typing.get_type_hints()` as the `localns` parameter when evaluating each
+field's type, alongside the dataclass' own module globals. Dacite never scans other
+imported modules to guess a type, so two plugins can define records sharing the same
+name and each rebuild its models within its own context - nested forward references
+are resolved with the same context, and one context never affects the resolution
+result of another.
 
 ```python
 @dataclass
@@ -379,6 +384,20 @@ class Y:
 
 data = from_dict(X, {"y": {"s": "text"}}, Config(forward_references={"Y": Y}))
 assert data == X(Y("text"))
+```
+
+If a forward reference cannot be resolved within the given context, `from_dict`
+raises `ForwardReferenceError` naming both the missing reference and the field that
+uses it instead of guessing a class:
+
+```python
+@dataclass
+class X:
+    y: "Y"
+
+from_dict(X, {"y": {"s": "text"}})
+# dacite.exceptions.ForwardReferenceError:
+# can not resolve forward reference: "Y" in field "y"
 ```
 
 ### Type checking
@@ -445,7 +464,7 @@ required field
 - `UnionMatchError` - raised when provided data does not match any type
 of `Union`
 - `ForwardReferenceError` - raised when undefined forward reference encountered in
-dataclass
+dataclass; the message names both the missing reference and the field that uses it
 - `UnexpectedDataError` - raised when `strict` mode is enabled and the input 
 data has not matching keys
 - `StrictUnionMatchError` - raised when `strict_unions_match` mode is enabled 

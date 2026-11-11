@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-...
+### Changed
+
+- Treat `Config.forward_references` as a local type resolution context. Forward references are resolved only against this context and the dataclass' own module globals, so two plugins can define records with the same name and each rebuild its models within its own context, including nested references. One context no longer affects the resolution result used by another plugin.
+- `ForwardReferenceError` now names both the missing reference and the field that uses it (e.g. `can not resolve forward reference: "Y" in field "y"`).
+
+### Removed
+
+- Remove the `sys.modules` ancestor-package lookup that guessed a class for an unresolved forward reference. Dacite no longer scans business modules for a matching name.
 
 ## [1.9.2] - 2025-02-05
 
