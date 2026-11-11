@@ -2,6 +2,7 @@ import operator
 
 from jmespath import functions
 from jmespath.compat import string_type
+from jmespath.missing import MISSING
 from numbers import Number
 
 
@@ -58,7 +59,8 @@ def _is_actual_number(x):
 
 class Options(object):
     """Options to control how a JMESPath function is evaluated."""
-    def __init__(self, dict_cls=None, custom_functions=None):
+    def __init__(self, dict_cls=None, custom_functions=None,
+                 preserve_missing=False):
         #: The class to use when creating a dict.  The interpreter
         #  may create dictionaries during the evaluation of a JMESPath
         #  expression.  For example, a multi-select hash will
@@ -69,6 +71,15 @@ class Options(object):
         #  have predictable key ordering.
         self.dict_cls = dict_cls
         self.custom_functions = custom_functions
+        #: When True, accessing a key that is absent from an object
+        #  evaluates to the jmespath.MISSING sentinel instead of None.
+        #  This allows distinguishing "field not present" from an
+        #  explicit null value.  The MISSING value propagates through
+        #  field/index access, is treated as false in filters and
+        #  boolean expressions, and is dropped from projections just
+        #  like null.  This is disabled by default so that search()
+        #  results are unchanged.
+        self.preserve_missing = preserve_missing
 
 
 class _Expression(object):
@@ -117,6 +128,7 @@ class TreeInterpreter(Visitor):
         self._options = options
         if options.dict_cls is not None:
             self._dict_cls = self._options.dict_cls
+        self._preserve_missing = getattr(options, 'preserve_missing', False)
         if options.custom_functions is not None:
             self._functions = self._options.custom_functions
         else:
@@ -132,7 +144,11 @@ class TreeInterpreter(Visitor):
         return result
 
     def visit_field(self, node, value):
+        if value is MISSING:
+            return MISSING
         try:
+            if self._preserve_missing:
+                return value.get(node['value'], MISSING)
             return value.get(node['value'])
         except AttributeError:
             return None
@@ -179,7 +195,7 @@ class TreeInterpreter(Visitor):
         for element in base:
             if self._is_true(self.visit(comparator_node, element)):
                 current = self.visit(node['children'][1], element)
-                if current is not None:
+                if current is not None and current is not MISSING:
                     collected.append(current)
         return collected
 
@@ -200,6 +216,8 @@ class TreeInterpreter(Visitor):
         return value
 
     def visit_index(self, node, value):
+        if value is MISSING:
+            return MISSING
         # Even though we can index strings, we don't
         # want to support that.
         if not isinstance(value, list):
@@ -230,6 +248,8 @@ class TreeInterpreter(Visitor):
     def visit_multi_select_dict(self, node, value):
         if value is None:
             return None
+        if value is MISSING:
+            return MISSING
         collected = self._dict_cls()
         for child in node['children']:
             collected[child['value']] = self.visit(child, value)
@@ -238,6 +258,8 @@ class TreeInterpreter(Visitor):
     def visit_multi_select_list(self, node, value):
         if value is None:
             return None
+        if value is MISSING:
+            return MISSING
         collected = []
         for child in node['children']:
             collected.append(self.visit(child, value))
@@ -276,7 +298,7 @@ class TreeInterpreter(Visitor):
         collected = []
         for element in base:
             current = self.visit(node['children'][1], element)
-            if current is not None:
+            if current is not None and current is not MISSING:
                 collected.append(current)
         return collected
 
@@ -289,7 +311,7 @@ class TreeInterpreter(Visitor):
         collected = []
         for element in base:
             current = self.visit(node['children'][1], element)
-            if current is not None:
+            if current is not None and current is not MISSING:
                 collected.append(current)
         return collected
 
@@ -298,7 +320,7 @@ class TreeInterpreter(Visitor):
         # because the truth/false values are different between
         # python and jmespath.
         return (value == '' or value == [] or value == {} or value is None or
-                value is False)
+                value is False or value is MISSING)
 
     def _is_true(self, value):
         return not self._is_false(value)

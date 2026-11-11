@@ -4,6 +4,7 @@ import json
 from jmespath import exceptions
 from jmespath.compat import string_type as STRING_TYPE
 from jmespath.compat import get_methods
+from jmespath.missing import MISSING
 
 
 # python types -> jmespath types
@@ -12,6 +13,7 @@ TYPES_MAP = {
     'list': 'array',
     'dict': 'object',
     'NoneType': 'null',
+    'MissingType': 'missing',
     'unicode': 'string',
     'str': 'string',
     'float': 'number',
@@ -175,7 +177,7 @@ class Functions(metaclass=FunctionRegistry):
     @signature({'types': [], 'variadic': True})
     def _func_not_null(self, *arguments):
         for argument in arguments:
-            if argument is not None:
+            if argument is not None and argument is not MISSING:
                 return argument
 
     @signature({'types': []})
@@ -197,7 +199,7 @@ class Functions(metaclass=FunctionRegistry):
     def _func_to_number(self, arg):
         if isinstance(arg, (list, dict, bool)):
             return None
-        elif arg is None:
+        elif arg is None or arg is MISSING:
             return None
         elif isinstance(arg, (int, float)):
             return arg
@@ -305,6 +307,15 @@ class Functions(metaclass=FunctionRegistry):
             return "number"
         elif arg is None:
             return "null"
+        elif arg is MISSING:
+            return "missing"
+
+    @signature({'types': []})
+    def _func_is_missing(self, arg):
+        # Only values produced while evaluating with
+        # Options(preserve_missing=True) can be missing, so this
+        # always returns False in a normal search() call.
+        return arg is MISSING
 
     @signature({'types': ['array']}, {'types': ['expref']})
     def _func_sort_by(self, array, expref):
