@@ -409,6 +409,44 @@ returns instance of this type. It means that it's possible that there are other
 matching types further on the `Union` types list. With `strict_unions_match` 
 only a single match is allowed, otherwise `dacite` raises `StrictUnionMatchError`.
 
+### Collecting all errors
+
+`from_dict` stops at the first error it detects. When you are importing wide
+records (e.g. hundreds of columns), fixing one field at a time is slow. Use
+`from_dict_collecting_errors` instead: it traverses the whole input and gathers
+every error that can be detected independently — missing values, wrong types,
+nested record errors, ambiguous union matches and unexpected keys — into a single
+`DaciteAggregateError`. Each collected error keeps a `field_path` that locates it
+inside the original input, including list indices (`items[1].i`) and mapping keys
+(`table['b'].name`).
+
+```python
+from dataclasses import dataclass
+from typing import List
+from dacite import DaciteAggregateError, from_dict_collecting_errors
+
+
+@dataclass
+class Row:
+    name: str
+    values: List[int]
+
+
+try:
+    row = from_dict_collecting_errors(Row, {"name": 1, "values": [1, "bad", 3]})
+except DaciteAggregateError as error:
+    for field_error in error.errors:
+        print(field_error.field_path, field_error)
+    # name wrong value type for field "name" ...
+    # values[1] wrong value type for field "values[1]" ...
+```
+
+Constructors and `__post_init__` are only invoked once the whole input is
+prepared successfully, so they never run for a record that still contains errors.
+Any exception they raise is a business exception and is propagated unchanged,
+never wrapped in `DaciteAggregateError`. The default `from_dict` keeps its
+fail-fast behavior.
+
 ## Convert key
 
 You can pass a callable to the `convert_key` configuration parameter to convert camelCase to snake_case.
@@ -450,6 +488,9 @@ dataclass
 data has not matching keys
 - `StrictUnionMatchError` - raised when `strict_unions_match` mode is enabled 
 and the input data has ambiguous `Union` match
+- `DaciteAggregateError` - raised only by `from_dict_collecting_errors`; holds
+all independently detectable errors in its `errors` attribute, each one a
+`DaciteFieldError` with a `field_path` into the original input
 
 ## Development
 

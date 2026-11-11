@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-...
+### Added
+
+- `from_dict_collecting_errors` — an alternative entry point that keeps going after
+  the first error and returns every independently detectable problem (missing values,
+  wrong types, nested record errors, ambiguous union matches and unexpected keys) as a
+  single `DaciteAggregateError`, each error carrying a `field_path` pointing at the
+  original input. Constructors and `__post_init__` only run once the whole input is
+  prepared successfully, and exceptions they raise are propagated unchanged.
+
 
 ## [1.9.2] - 2025-02-05
 

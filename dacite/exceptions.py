@@ -1,4 +1,4 @@
-from typing import Any, Type, Optional, Set, Dict
+from typing import Any, List, Type, Optional, Set, Dict
 from dacite.types import is_union
 
 
@@ -17,9 +17,18 @@ class DaciteFieldError(DaciteError):
 
     def update_path(self, parent_field_path: str) -> None:
         if self.field_path:
-            self.field_path = f"{parent_field_path}.{self.field_path}"
+            separator = "" if self.field_path.startswith("[") else "."
+            self.field_path = f"{parent_field_path}{separator}{self.field_path}"
         else:
             self.field_path = parent_field_path
+
+    def prepend_index(self, index: Any) -> None:
+        segment = f"[{index!r}]" if isinstance(index, str) else f"[{index}]"
+        if self.field_path:
+            separator = "" if self.field_path.startswith("[") else "."
+            self.field_path = f"{segment}{separator}{self.field_path}"
+        else:
+            self.field_path = segment
 
 
 class WrongTypeError(DaciteFieldError):
@@ -70,11 +79,32 @@ class ForwardReferenceError(DaciteError):
         return f"can not resolve forward reference: {self.message}"
 
 
-class UnexpectedDataError(DaciteError):
-    def __init__(self, keys: Set[str]) -> None:
-        super().__init__()
+class UnexpectedDataError(DaciteFieldError):
+    def __init__(self, keys: Set[str], field_path: Optional[str] = None) -> None:
+        super().__init__(field_path=field_path)
         self.keys = keys
 
     def __str__(self) -> str:
         formatted_keys = ", ".join(f'"{key}"' for key in self.keys)
         return f"can not match {formatted_keys} to any data class field"
+
+
+class DaciteAggregateError(DaciteError):
+    """Raised in the error-collecting mode instead of stopping at the first error.
+
+    It holds every independently detectable error found while traversing the input:
+    missing values, wrong types, strict-union/ambiguous matches, unexpected keys and
+    errors raised while building nested records. Each error keeps a ``field_path``
+    pointing at the place in the original input.
+    """
+
+    def __init__(self, errors: List[DaciteFieldError]) -> None:
+        super().__init__()
+        self.errors = errors
+
+    def __str__(self) -> str:
+        lines = []
+        for error in self.errors:
+            location = f"{error.field_path}: " if error.field_path else ""
+            lines.append(f"- {location}{error}")
+        return f"{len(self.errors)} error(s) found while building the data class:\n" + "\n".join(lines)
