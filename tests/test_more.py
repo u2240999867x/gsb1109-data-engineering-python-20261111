@@ -3997,6 +3997,76 @@ class RunLengthTest(TestCase):
         self.assertEqual(actual, expected)
 
 
+class IncrementalRunLengthTest(TestCase):
+    def test_basic(self):
+        actual = list(mi.incremental_run_length('abbcccdddd'))
+        expected = [
+            ('a', 1, (0, 1)),
+            ('b', 2, (1, 3)),
+            ('c', 3, (3, 6)),
+            ('d', 4, (6, 10)),
+        ]
+        self.assertEqual(actual, expected)
+
+    def test_empty(self):
+        self.assertEqual(list(mi.incremental_run_length([])), [])
+        self.assertEqual(list(mi.incremental_run_length([], max_count=2)), [])
+
+    def test_max_count_splits_long_runs(self):
+        actual = list(mi.incremental_run_length('aaaaaaa', max_count=3))
+        expected = [('a', 3, (0, 3)), ('a', 3, (3, 6)), ('a', 1, (6, 7))]
+        self.assertEqual(actual, expected)
+
+    def test_max_count_exact_multiple(self):
+        actual = list(mi.incremental_run_length('xxxxxxy', max_count=3))
+        expected = [('x', 3, (0, 3)), ('x', 3, (3, 6)), ('y', 1, (6, 7))]
+        self.assertEqual(actual, expected)
+
+    def test_max_count_one(self):
+        actual = list(mi.incremental_run_length('aab', max_count=1))
+        expected = [('a', 1, (0, 1)), ('a', 1, (1, 2)), ('b', 1, (2, 3))]
+        self.assertEqual(actual, expected)
+
+    def test_continuation_segments_are_adjacent(self):
+        records = list(mi.incremental_run_length('aaaaaaaaab', max_count=4))
+        self.assertEqual(
+            records,
+            [
+                ('a', 4, (0, 4)),
+                ('a', 4, (4, 8)),
+                ('a', 1, (8, 9)),
+                ('b', 1, (9, 10)),
+            ],
+        )
+        for record, next_record in zip(records, records[1:]):
+            value, _, (_, stop) = record
+            next_value, _, (next_start, _) = next_record
+            if value == next_value:
+                self.assertEqual(next_start, stop)
+
+    def test_counts_and_intervals_reconstruct_input(self):
+        iterable = 'aaabbbbaaaaaaccc'
+        for max_count in (None, 1, 2, 3, 5, 100):
+            with self.subTest(max_count=max_count):
+                records = list(mi.incremental_run_length(iterable, max_count))
+                rebuilt = ''.join(value * count for value, count, _ in records)
+                self.assertEqual(rebuilt, iterable)
+                stop = 0
+                for value, count, (start, stop) in records:
+                    self.assertEqual(stop, start + count)
+                self.assertEqual(stop, len(iterable))
+
+    def test_invalid_max_count(self):
+        for max_count in (0, -1):
+            with self.subTest(max_count=max_count):
+                with self.assertRaises(ValueError):
+                    list(mi.incremental_run_length('ab', max_count))
+
+    def test_lazy(self):
+        it = mi.incremental_run_length(iter('aaab'), max_count=2)
+        self.assertEqual(next(it), ('a', 2, (0, 2)))
+
+
 class ExactlyNTests(TestCase):
     """Tests for ``exactly_n()``"""
 

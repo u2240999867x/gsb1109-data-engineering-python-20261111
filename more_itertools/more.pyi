@@ -76,6 +76,7 @@ __all__ = [
     'idft',
     'iequals',
     'ilen',
+    'incremental_run_length',
     'interleave',
     'interleave_evenly',
     'interleave_longest',
@@ -653,6 +654,9 @@ class run_length:
     @staticmethod
     def decode(iterable: Iterable[tuple[_T, int]]) -> Iterator[_T]: ...
 
+def incremental_run_length(
+    iterable: Iterable[_T], max_count: int | None = ...
+) -> Iterator[tuple[_T, int, tuple[int, int]]]: ...
 def exactly_n(
     iterable: Iterable[_T], n: int, predicate: Callable[[_T], object] = ...
 ) -> bool: ...

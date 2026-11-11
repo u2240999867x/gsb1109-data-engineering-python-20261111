@@ -103,6 +103,7 @@ __all__ = [
     'idft',
     'iequals',
     'ilen',
+    'incremental_run_length',
     'interleave',
     'interleave_evenly',
     'interleave_longest',
@@ -3201,6 +3202,51 @@ class run_length:
     @staticmethod
     def decode(iterable):
         return chain.from_iterable(starmap(repeat, iterable))
+
+
+def incremental_run_length(iterable, max_count=None):
+    """Compress an iterable with incremental run-length encoding.
+
+    Yields ``(value, count, (start, stop))`` tuples for each run of repeated
+    items, where *count* is the number of repetitions and ``(start, stop)``
+    is the half-open interval of indexes the run occupies in the input:
+
+        >>> list(incremental_run_length('abbccc'))
+        [('a', 1, (0, 1)), ('b', 2, (1, 3)), ('c', 3, (3, 6))]
+
+    If *max_count* is given, a single run is split into multiple tuples with
+    at most *max_count* repetitions each, so long runs are delivered
+    incrementally instead of waiting for the value to change:
+
+        >>> list(incremental_run_length('aaaaaaa', max_count=3))
+        [('a', 3, (0, 3)), ('a', 3, (3, 6)), ('a', 1, (6, 7))]
+
+    Tuples that belong to the same run can be recognized by an equal *value*
+    and adjacent intervals (each *start* equals the previous *stop*). The
+    final tuple of a run is emitted when the value changes or the iterable
+    is exhausted. Only a running count is kept, so memory usage is constant
+    regardless of run length. An empty iterable yields nothing.
+    """
+    if max_count is not None and max_count < 1:
+        raise ValueError('max_count must be at least 1')
+
+    run_value = _marker
+    run_count = 0
+    run_start = 0
+    for index, item in enumerate(iterable):
+        if run_count and item != run_value:
+            yield run_value, run_count, (run_start, index)
+            run_count = 0
+        if not run_count:
+            run_value = item
+            run_start = index
+        run_count += 1
+        if run_count == max_count:
+            yield run_value, run_count, (run_start, index + 1)
+            run_count = 0
+
+    if run_count:
+        yield run_value, run_count, (run_start, run_start + run_count)
 
 
 def exactly_n(iterable, n, predicate=bool):

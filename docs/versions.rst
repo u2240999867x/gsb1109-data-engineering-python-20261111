@@ -8,6 +8,9 @@ Version History
 Unreleased
 ----------
 
+* New functions:
+    * :func:`incremental_run_length` was added.
+
 * Updated functions:
     * :func:`peekable` was updated to avoid caching the entire iterable when sliced with a negative step and omitted *stop*.
 
