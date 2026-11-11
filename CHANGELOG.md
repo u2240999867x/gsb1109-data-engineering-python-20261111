@@ -14,6 +14,7 @@ _(unreleased)_
 - Added timezone suffix support (`Z`, `+HH:MM`, `-HHMM`, optional seconds) to [`timeutils.isoparse`][timeutils.isoparse], returning aware datetimes so aware `isoformat()` output round-trips ([#594](https://github.com/mahmoud/boltons/pull/594))
 - Added keyword-only support to [`funcutils.wraps`][funcutils.wraps] `expected` via `(name, default, kwonly)` triples ([#522](https://github.com/mahmoud/boltons/pull/522))
 - Added [`iterutils.chunked_filter`][iterutils.chunked_filter], which filters an iterable in batches, calling the predicate once per batch ([#491](https://github.com/mahmoud/boltons/pull/491))
+- Added [`jsonutils.JSONLFileFollower`][jsonutils.JSONLFileFollower], an explicit `tail -f`-style follower for rotating JSONL files. It retains unfinished trailing lines until complete, emits replacement/truncation events with switchable follow policies ([`jsonutils.JSONLFollowPolicy`][jsonutils.JSONLFollowPolicy]), and tags every record with its file generation ([`jsonutils.JSONLFollowEvent`][jsonutils.JSONLFollowEvent]); blocking iteration sleeps between polls instead of busy-looping
 - Fixed [`listutils.BarrelList`][listutils.BarrelList] pickling and `copy.copy`/`copy.deepcopy` (hang/duplication) by adding `__reduce__` ([#596](https://github.com/mahmoud/boltons/pull/596))
 - Fixed [`listutils.BarrelList`][listutils.BarrelList] rich comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`) comparing empty base-list storage instead of contents ([#544](https://github.com/mahmoud/boltons/pull/544))
 - Fixed [`listutils.BarrelList`][listutils.BarrelList] `+`, `+=`, `*` and `*=` operating on empty base-list storage ([#540](https://github.com/mahmoud/boltons/pull/540), [#532](https://github.com/mahmoud/boltons/pull/532))
@@ -1439,3 +1440,6 @@ added in this release.
 [urlutils.URL.navigate]: https://boltons.readthedocs.io/en/latest/urlutils.html#boltons.urlutils.URL.navigate
 [urlutils.register_scheme]: https://boltons.readthedocs.io/en/latest/urlutils.html#boltons.urlutils.register_scheme
 [dictutils.OrderedMultiDict.update_extend]: https://boltons.readthedocs.io/en/latest/dictutils.html#boltons.dictutils.OrderedMultiDict.update_extend
+[jsonutils.JSONLFileFollower]: https://boltons.readthedocs.io/en/latest/jsonutils.html#boltons.jsonutils.JSONLFileFollower
+[jsonutils.JSONLFollowPolicy]: https://boltons.readthedocs.io/en/latest/jsonutils.html#boltons.jsonutils.JSONLFollowPolicy
+[jsonutils.JSONLFollowEvent]: https://boltons.readthedocs.io/en/latest/jsonutils.html#boltons.jsonutils.JSONLFollowEvent
