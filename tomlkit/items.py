@@ -1906,6 +1906,20 @@ class AbstractTable(Item, _CustomDict):  # type: ignore[type-arg]
 
         return self
 
+    def rename(
+        self: AT,
+        source: str | Key | Sequence[str | int | Key],
+        target: str | Key | Sequence[str | int | Key],
+    ) -> AT:
+        """Rename the key at logical path ``source`` to ``target`` in place.
+
+        See :meth:`tomlkit.container.Container.rename`; the table's own
+        formatting, comments and value literals are preserved, and the
+        document is left untouched if the destination is unavailable.
+        """
+        self._value.rename(source, target)
+        return self
+
     def item(self, key: Key | str) -> Item | OutOfOrderTableProxy:
         return self._value.item(key)
 

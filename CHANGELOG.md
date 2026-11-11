@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `rename()` to `Container`, `TOMLDocument`, `Table` and `InlineTable` for renaming a key by its logical dotted path (e.g. `storage.timeout` to `storage.request_timeout`). It handles both dotted keys written on one line and keys nested under `[table]` headers, preserves the original value formatting, whitespace and comments in place (without re-encoding the document through dicts), and leaves the document untouched while raising the new `KeyRenameError` when the destination already exists or would redefine an existing implicit table.
+
 ### Changed
 
 - Speed up repeated array appends by keeping existing indexes instead of rebuilding them.

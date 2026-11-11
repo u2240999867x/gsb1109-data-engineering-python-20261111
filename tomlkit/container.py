@@ -4,6 +4,7 @@ import copy
 import math
 
 from collections.abc import Iterator
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 from typing import Any
 
@@ -16,10 +17,13 @@ from tomlkit._types import _CustomDict
 from tomlkit._utils import merge_dicts
 from tomlkit.exceptions import InvalidStringError
 from tomlkit.exceptions import KeyAlreadyPresent
+from tomlkit.exceptions import KeyRenameError
 from tomlkit.exceptions import NonExistentKey
 from tomlkit.exceptions import TOMLKitError
 from tomlkit.items import AoT
 from tomlkit.items import Comment
+from tomlkit.items import DottedKey
+from tomlkit.items import InlineTable
 from tomlkit.items import Item
 from tomlkit.items import Key
 from tomlkit.items import Null
@@ -100,6 +104,388 @@ def _render_empty_aot(key: str, aot: AoT) -> str:
         f"{decode(aot.trivia.comment)}"
         f"{aot.trivia.trail or chr(10)}"
     )
+
+
+PathPart = SingleKey | int
+
+
+def _coerce_key_fragments(
+    path: str | Key | Sequence[str | int | Key],
+) -> list[PathPart]:
+    """Turn a dotted path into keys.
+
+    Strings and ``Key`` parts name table entries; an integer part indexes an
+    array of tables element (e.g. ``("servers", 0, "host")``).
+    """
+    if isinstance(path, Key):
+        return list(path)
+    if isinstance(path, str):
+        path = path.split(".")
+    fragments: list[PathPart] = []
+    for part in path:
+        if isinstance(part, int):
+            fragments.append(part)
+        elif isinstance(part, SingleKey):
+            fragments.append(part)
+        elif isinstance(part, Key):
+            if len(part._keys) != 1:
+                raise ValueError("Each path part must name a single key")
+            fragments.append(next(iter(part)))
+        else:
+            fragments.append(SingleKey(part))
+    if not fragments:
+        raise ValueError("A key path cannot be empty")
+    return fragments
+
+
+def _dotted_path_string(fragments: Sequence[PathPart]) -> str:
+    return ".".join(
+        str(part) if isinstance(part, int) else part.key for part in fragments
+    )
+
+
+def _header_fragments(fragments: Sequence[PathPart]) -> list[SingleKey]:
+    """Drop array-of-tables element indices from a header path."""
+    return [part for part in fragments if isinstance(part, SingleKey)]
+
+
+def _find_body_entry(
+    container: Container, key: SingleKey
+) -> tuple[int, Key, Item] | None:
+    """Locate the (first) body entry stored under ``key`` in ``container``."""
+    index = container._map.get(key)
+    if index is None:
+        return None
+    body_index = index[0] if isinstance(index, tuple) else index
+    body_key, item = container._body[body_index]
+    assert body_key is not None
+    return body_index, body_key, item
+
+
+def _invalidate_table_names(table: Table) -> None:
+    """Drop cached header names of ``table`` and every table nested in it."""
+    table.display_name = None
+    table.name = None
+    for _, child in table.value.body:
+        if isinstance(child, Table):
+            _invalidate_table_names(child)
+        elif isinstance(child, AoT):
+            for element in child.body:
+                _invalidate_table_names(element)
+
+
+def _rename_table_entry(
+    holder: _EntryHolder,
+    new_fragment: SingleKey,
+    target_path: Sequence[SingleKey],
+) -> None:
+    """Rename the table/AoT held by ``holder`` in place.
+
+    The header path is rebuilt from the new fragments and cached display
+    names inside the table are invalidated, so every nested ``[header]``
+    picks up the renamed prefix on the next render.
+    """
+    container = holder.container
+    body_index = holder.index
+    old_key = holder.key
+    item = holder.item
+    if isinstance(item, Table):
+        _invalidate_table_names(item)
+        rendered_key = (
+            DottedKey(list(target_path))
+            if len(target_path) > 1
+            else target_path[0]
+        )
+        item.display_name = rendered_key.as_string()
+        item.name = new_fragment.key
+        container._body[body_index] = (new_fragment, item)
+    else:
+        assert isinstance(item, AoT)
+        item.name = new_fragment.key
+        for element in item.body:
+            _invalidate_table_names(element)
+            element.display_name = ".".join(part.as_string() for part in target_path)
+        container._body[body_index] = (new_fragment, item)
+
+    del container._map[old_key]
+    container._map[new_fragment] = holder.map_index
+    for position, table_key in enumerate(container._table_keys):
+        if table_key == old_key:
+            container._table_keys[position] = new_fragment
+    dict.__delitem__(container, old_key.key)
+    dict.__setitem__(container, new_fragment.key, item.value)
+    container._validation_cache.clear()
+    holder.key = new_fragment
+    holder.source_path = list(target_path)
+
+
+def _rename_leaf_entry(holder: _EntryHolder, new_fragment: SingleKey) -> None:
+    """Rename a plain (non-table) entry in place, keeping its trivia."""
+    container = holder.container
+    body_index = holder.index
+    old_key = holder.key
+    item = holder.item
+    if isinstance(item, (Table, AoT)):
+        raise TypeError("Tables and arrays of tables need _rename_table_entry()")
+    # The parser keeps the whitespace between the key and the separator inside
+    # the key's original text (e.g. "timeout " + "= "); carry it over so the
+    # spacing around "=" is preserved byte for byte.
+    trailing_ws = old_key._original[len(old_key._original.rstrip(" \t")) :]
+    replacement = SingleKey(
+        new_fragment.key,
+        t=new_fragment.t,
+        sep=old_key.sep,
+        original=new_fragment._original + trailing_ws,
+    )
+    replacement._dotted = old_key.is_dotted()
+    if old_key.is_multi():
+        # A dotted leaf (`a.b.c = 1`) is stored as a chain of super tables;
+        # rebuild the key chain so the inline path renders with the new name.
+        new_key = DottedKey([*old_key._keys[:-1], replacement], sep=old_key.sep)
+    else:
+        new_key = replacement
+    container._body[body_index] = (new_key, item)
+    del container._map[old_key]
+    container._map[new_key] = holder.map_index
+    dict.__delitem__(container, old_key.key)
+    dict.__setitem__(container, new_key.key, item.value)
+    container._validation_cache.clear()
+    holder.key = new_key
+
+
+def _locate_entry(
+    root: Container, fragments: Sequence[PathPart]
+) -> _EntryHolder:
+    """Resolve ``fragments`` to the body entry of its last key.
+
+    Out-of-order tables are resolved through their proxy so that renaming a
+    key spread across several ``[table]`` parts rewrites every part, and
+    integer fragments select an array-of-tables element. Raises
+    ``NonExistentKey`` as soon as a prefix is missing.
+    """
+    current: Container | OutOfOrderTableProxy | AoT = root
+    walked: list[PathPart] = []
+    for depth, fragment in enumerate(fragments):
+        is_last = depth == len(fragments) - 1
+        if isinstance(fragment, int):
+            if not isinstance(current, AoT):
+                raise NonExistentKey(_dotted_path_string(fragments))
+            try:
+                element = current.body[fragment]
+            except IndexError:
+                raise NonExistentKey(_dotted_path_string(fragments)) from None
+            current = element.value
+            walked.append(fragment)
+            continue
+        if fragment not in current:
+            raise NonExistentKey(_dotted_path_string(fragments))
+        if is_last:
+            if isinstance(current, OutOfOrderTableProxy):
+                return _locate_proxy_entry(current, fragment, [*walked, fragment])
+            index = current._map[fragment]
+            if isinstance(index, tuple):
+                proxy = current.item(fragment)
+                assert isinstance(proxy, OutOfOrderTableProxy)
+                return _locate_proxy_entry(proxy, fragment, [*walked, fragment])
+            body_key, item = current._body[index]
+            assert body_key is not None
+            return _EntryHolder(
+                current, index, body_key, item, [*walked, fragment]
+            )
+        child = current[fragment]
+        if isinstance(child, OutOfOrderTableProxy):
+            current = child
+            walked.append(fragment)
+            continue
+        if isinstance(child, (Table, InlineTable)):
+            current = child.value
+            walked.append(fragment)
+            continue
+        if isinstance(child, AoT):
+            current = child
+            walked.append(fragment)
+            continue
+        raise NonExistentKey(_dotted_path_string(fragments))
+    raise NonExistentKey(_dotted_path_string(fragments))
+
+
+def _locate_proxy_entry(
+    proxy: OutOfOrderTableProxy,
+    fragment: SingleKey,
+    source_path: Sequence[PathPart],
+) -> _EntryHolder:
+    """Find the body entry backing ``fragment`` inside an out-of-order table."""
+    part_indices = proxy._tables_map.get(fragment)
+    if part_indices is None:
+        raise NonExistentKey(_dotted_path_string(source_path))
+    table = proxy._tables[part_indices[0]]
+    map_index = table.value._map[fragment]
+    index = map_index[0] if isinstance(map_index, tuple) else map_index
+    body_key, item = table.value._body[index]
+    assert body_key is not None
+    return _EntryHolder(
+        table.value,
+        index,
+        body_key,
+        item,
+        list(source_path),
+        proxy=proxy,
+        map_index=map_index,
+    )
+
+
+def _ensure_target_available(
+    root: Container,
+    source_fragments: Sequence[PathPart],
+    target_fragments: Sequence[PathPart],
+) -> None:
+    """Validate the destination of a rename before anything is mutated.
+
+    Fails if the target already exists, or if reaching it would have to pass
+    through an existing key that is not a table (e.g. a scalar that the new
+    path would silently turn into an implicit table). Existing super tables
+    are safe to extend, matching the rule the parser applies to dotted keys.
+    """
+    current: Container | OutOfOrderTableProxy | AoT = root
+    for depth, fragment in enumerate(target_fragments):
+        is_last = depth == len(target_fragments) - 1
+        if isinstance(fragment, int):
+            if not isinstance(current, AoT):
+                raise KeyRenameError(
+                    _dotted_path_string(source_fragments),
+                    _dotted_path_string(target_fragments),
+                    "the target path indexes a non array-of-tables",
+                )
+            try:
+                current = current.body[fragment].value
+            except IndexError:
+                raise KeyRenameError(
+                    _dotted_path_string(source_fragments),
+                    _dotted_path_string(target_fragments),
+                    "the target array-of-tables index does not exist",
+                ) from None
+            continue
+        if fragment not in current:
+            return
+        if is_last:
+            raise KeyRenameError(
+                _dotted_path_string(source_fragments),
+                _dotted_path_string(target_fragments),
+                "the target key already exists",
+            )
+        child = current[fragment]
+        if isinstance(child, OutOfOrderTableProxy):
+            current = child
+            continue
+        if isinstance(child, (Table, InlineTable)):
+            current = child.value
+            continue
+        if isinstance(child, AoT):
+            current = child
+            continue
+        raise KeyRenameError(
+            _dotted_path_string(source_fragments),
+            _dotted_path_string(target_fragments),
+            f'key "{fragment.key}" would redefine an existing table',
+        )
+
+
+def _materialize_target_container(
+    root: Container, target_parent: Sequence[PathPart]
+) -> Container:
+    """Resolve the target's parent path to a container, creating super tables.
+
+    Existing tables (including header-less super tables created by dotted
+    keys) are reused, so entries that render inline keep their form. Missing
+    fragments are inserted as ordinary super tables, which stay invisible in
+    the output until the relocated entry needs a header of its own.
+    """
+    current: Container | OutOfOrderTableProxy | AoT = root
+    for fragment in target_parent:
+        if isinstance(fragment, int):
+            assert isinstance(current, AoT)
+            current = current.body[fragment].value
+            continue
+        entry = _find_body_entry(current, fragment)
+        if entry is None:
+            table = Table(Container(True), Trivia(), False, is_super_table=True)
+            assert isinstance(current, Container)
+            current.append(fragment, table)
+            current = table.value
+            continue
+
+        _, _, item = entry
+        if isinstance(item, OutOfOrderTableProxy):
+            item = item._internal_container
+        elif isinstance(item, (Table, InlineTable)):
+            item = item.value
+        current = item
+    assert isinstance(current, Container)
+    return current
+
+
+def _prune_empty_super_tables(
+    root: Container, source_parent: Sequence[PathPart]
+) -> None:
+    """Remove implicit super tables left empty by moving their last entry out.
+
+    Only header-less (dotted/implicit) super tables are pruned; an explicit
+    ``[table]`` that becomes empty is kept, matching the behaviour of ``del``
+    on the table key. Out-of-order tables are left for the proxy machinery.
+    """
+    chain: list[tuple[Container, SingleKey]] = []
+    current: Container | OutOfOrderTableProxy = root
+    for fragment in source_parent:
+        if isinstance(fragment, int):
+            assert isinstance(current, AoT)
+            current = current.body[fragment].value
+            continue
+        if fragment not in current or isinstance(current, OutOfOrderTableProxy):
+            return
+        item = current.item(fragment)
+        if not isinstance(item, Table):
+            return
+        chain.append((current, fragment))
+        current = item.value
+
+    for container, fragment in reversed(chain):
+        item = container.item(fragment)
+        if (
+            isinstance(item, Table)
+            and item._is_super_table is True
+            and not len(item.value)
+        ):
+            container.remove(fragment)
+
+
+class _EntryHolder:
+    """A live reference to one body entry involved in a rename."""
+
+    def __init__(
+        self,
+        container: Container,
+        index: int,
+        key: Key,
+        item: Item,
+        source_path: Sequence[PathPart],
+        proxy: OutOfOrderTableProxy | None = None,
+        map_index: int | tuple[int, ...] | None = None,
+    ) -> None:
+        self.container = container
+        self.index = index
+        self.key = key
+        self.item = item
+        self.source_path = list(source_path)
+        # Set when the entry is reached through an out-of-order table proxy,
+        # whose merged view has to be re-keyed in addition to the live part.
+        self.proxy = proxy
+        # The (possibly tuple) index backing this key in ``container._map``;
+        # a tuple means the entry is an out-of-order table split into parts.
+        self.map_index = map_index if map_index is not None else index
+
+    @property
+    def is_table(self) -> bool:
+        return isinstance(self.item, (Table, AoT))
 
 
 class Container(_CustomDict):  # type: ignore[type-arg]
@@ -586,6 +972,88 @@ class Container(_CustomDict):  # type: ignore[type-arg]
             self._body[idx] = (None, Null())
 
         dict.__delitem__(self, key.key)
+
+        return self
+
+    def rename(
+        self,
+        source: str | Key | Sequence[str | int | Key],
+        target: str | Key | Sequence[str | int | Key],
+    ) -> Container:
+        """Rename the key at logical path ``source`` to ``target`` in place.
+
+        Both dotted keys written on one line (``storage.timeout = 1``) and
+        keys nested under ``[table]`` headers are addressed by their logical
+        path. Integer parts select an array-of-tables element (e.g.
+        ``("servers", 0, "host")``). The value keeps its original formatting,
+        trivia and comments; the document is never re-encoded through plain
+        dicts.
+
+        The destination is checked first: the document is left completely
+        untouched (and :class:`KeyRenameError` is raised) when ``target``
+        already exists or when reaching it would redefine an existing
+        implicit (super) table.
+        """
+        source_fragments = _coerce_key_fragments(source)
+        target_fragments = _coerce_key_fragments(target)
+
+        # Resolve and validate everything before touching a single body entry.
+        holder = _locate_entry(self, source_fragments)
+        _ensure_target_available(self, source_fragments, target_fragments)
+
+        target_parent = target_fragments[:-1]
+        source_parent = holder.source_path[:-1]
+        new_fragment = target_fragments[-1]
+        assert isinstance(new_fragment, SingleKey)
+        source_last = source_fragments[-1]
+        assert isinstance(source_last, SingleKey)
+        same_container = list(source_parent) == list(target_parent)
+
+        if same_container:
+            if holder.is_table:
+                target_header = _header_fragments(target_fragments)
+                if holder.proxy is not None:
+                    holder.proxy._rename_table_parts(
+                        source_last, new_fragment, target_header
+                    )
+                else:
+                    _rename_table_entry(holder, new_fragment, target_header)
+            else:
+                _rename_leaf_entry(holder, new_fragment)
+                if holder.proxy is not None:
+                    holder.proxy._rekey_merged_view(
+                        source_last, new_fragment, holder.item
+                    )
+        else:
+            if holder.proxy is not None:
+                holder.proxy._detach_renamed_entry(holder, source_last)
+            else:
+                # Container.remove() also drops the dict backing and the map
+                # entry, so the body slot is released before re-appending.
+                holder.container.remove(holder.key)
+            if holder.is_table:
+                target_header = _header_fragments(target_fragments)
+                _invalidate_table_names(holder.item)
+                if isinstance(holder.item, Table):
+                    holder.item.display_name = (
+                        DottedKey(target_header).as_string()
+                        if len(target_header) > 1
+                        else new_fragment.as_string()
+                    )
+                    holder.item.name = new_fragment.key
+                else:
+                    assert isinstance(holder.item, AoT)
+                    holder.item.name = new_fragment.key
+                    for element in holder.item.body:
+                        _invalidate_table_names(element)
+                        element.display_name = ".".join(
+                            part.as_string() for part in target_header
+                        )
+            destination = _materialize_target_container(self, target_parent)
+            destination.append(new_fragment, holder.item)
+            holder.source_path = list(target_fragments)
+            if holder.proxy is None:
+                _prune_empty_super_tables(self, source_parent)
 
         return self
 
@@ -1289,6 +1757,106 @@ class OutOfOrderTableProxy(_CustomDict):  # type: ignore[type-arg]
         del self._internal_container[key]
         if key is not None:
             dict.__delitem__(self, key)
+
+    def _rekey_merged_view(
+        self, old_key: SingleKey, new_key: SingleKey, value: Item
+    ) -> None:
+        """Reflect an in-place part rename in the proxy's merged view."""
+        self._internal_container.remove(old_key)
+        self._internal_container._raw_append(new_key, value)
+        if old_key in self._tables_map:
+            self._tables_map[new_key] = self._tables_map.pop(old_key)
+        dict.__delitem__(self, old_key.key)
+        dict.__setitem__(self, new_key.key, value)
+
+    def _rename_table_parts(
+        self,
+        old_key: SingleKey,
+        new_key: SingleKey,
+        target_header: Sequence[SingleKey],
+    ) -> None:
+        """Rename a table/AoT spread across every out-of-order part.
+
+        A key that names a table can be backed by several ``[table]`` parts;
+        each part's body entry is rewritten in place (preserving whether it
+        renders inline as a dotted super table or with a header), then the
+        proxy's merged view is re-keyed to match.
+        """
+        part_indices = self._tables_map[old_key]
+        part_tables = [self._tables[index] for index in part_indices]
+
+        value: Item | None = None
+        for part in part_tables:
+            map_index = part.value._map[old_key]
+            indices = map_index if isinstance(map_index, tuple) else (map_index,)
+            for first in indices:
+                body_key, item = part.value._body[first]
+                assert body_key is not None
+                value = item
+                replacement_key = SingleKey(
+                    new_key.key,
+                    t=new_key.t,
+                    sep=body_key.sep,
+                    original=new_key._original,
+                )
+                replacement_key._dotted = body_key.is_dotted()
+                if isinstance(item, Table):
+                    _invalidate_table_names(item)
+                    item.name = new_key.key
+                    if not body_key.is_dotted():
+                        item.display_name = (
+                            DottedKey(list(target_header)).as_string()
+                            if len(target_header) > 1
+                            else new_key.as_string()
+                        )
+                else:
+                    assert isinstance(item, AoT)
+                    item.name = new_key.key
+                    for element in item.body:
+                        _invalidate_table_names(element)
+                        if not body_key.is_dotted():
+                            element.display_name = ".".join(
+                                fragment.as_string()
+                                for fragment in target_header
+                            )
+                del part.value._map[body_key]
+                part.value._map[replacement_key] = map_index
+                part.value._body[first] = (replacement_key, item)
+                for position, table_key in enumerate(part.value._table_keys):
+                    if table_key == body_key:
+                        part.value._table_keys[position] = replacement_key
+                dict.__delitem__(part.value, body_key.key)
+                dict.__setitem__(part.value, new_key.key, item.value)
+                part.value._validation_cache.clear()
+
+        assert value is not None
+        self._tables_map[new_key] = self._tables_map.pop(old_key)
+        internal = self._internal_container
+        old_index = internal._map.pop(old_key)
+        internal._map[new_key] = old_index
+        indices = old_index if isinstance(old_index, tuple) else (old_index,)
+        for body_index in indices:
+            _, table_item = internal._body[body_index]
+            internal._body[body_index] = (new_key, table_item)
+        dict.__delitem__(self, old_key.key)
+        dict.__setitem__(self, new_key.key, value.value)
+
+    def _detach_renamed_entry(
+        self, holder: _EntryHolder, old_key: SingleKey
+    ) -> None:
+        """Drop an entry that is being moved out of an out-of-order table.
+
+        Mirrors :meth:`__delitem__` but keeps the (already detached) item
+        object so the caller can re-append it at the destination with its
+        trivia intact.
+        """
+        part_index = self._tables_map[old_key][0]
+        table = self._tables[part_index]
+        table.value.remove(holder.key)
+        dict.__delitem__(table, old_key.key)
+        del self._tables_map[old_key]
+        del self._internal_container[old_key]
+        dict.__delitem__(self, old_key.key)
 
     def __iter__(self) -> Iterator[str]:
         return iter(dict.keys(self))

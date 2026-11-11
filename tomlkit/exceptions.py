@@ -200,6 +200,22 @@ class KeyAlreadyPresent(TOMLKitError):
         super().__init__(message)
 
 
+class KeyRenameError(TOMLKitError):
+    """
+    A key could not be renamed because the destination is already in use or
+    cannot be represented without redefining an existing (implicit) table.
+
+    The document is left untouched when this error is raised.
+    """
+
+    def __init__(self, source: object, target: object, reason: str) -> None:
+        source = getattr(source, "key", source)
+        target = getattr(target, "key", target)
+        message = f'Cannot rename key "{source}" to "{target}": {reason}.'
+
+        super().__init__(message)
+
+
 class InvalidControlChar(ParseError):
     def __init__(self, line: int, col: int, char: int, type: str) -> None:
         display_code = "\\u00"
