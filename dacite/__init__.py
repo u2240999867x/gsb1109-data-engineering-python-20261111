@@ -11,6 +11,7 @@ from dacite.exceptions import (
     ForwardReferenceError,
     UnexpectedDataError,
 )
+from dacite.patch import MISSING
 
 __all__ = [
     "set_cache_size",
@@ -18,6 +19,7 @@ __all__ = [
     "clear_cache",
     "Config",
     "from_dict",
+    "MISSING",
     "DaciteError",
     "DaciteFieldError",
     "WrongTypeError",

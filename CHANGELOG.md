@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Config.partial` option and the `MISSING` sentinel for patch payloads:
+  fields omitted from the input are set to `MISSING` instead of defaults or
+  `None`, so missing, explicitly `None` and provided values stay
+  distinguishable, including for nested objects where a missing object and an
+  empty object now have different meanings
+
 ...
 
 ## [1.9.2] - 2025-02-05

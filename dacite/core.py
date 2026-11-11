@@ -1,6 +1,6 @@
 from dataclasses import is_dataclass
 from itertools import zip_longest
-from typing import TypeVar, Type, Optional, Mapping, Any, Collection, MutableMapping
+from typing import TypeVar, Type, Optional, Mapping, Any, Collection, MutableMapping, List
 
 from dacite.cache import cache
 from dacite.config import Config
@@ -20,6 +20,7 @@ from dacite.exceptions import (
     UnexpectedDataError,
     StrictUnionMatchError,
 )
+from dacite.patch import MISSING
 from dacite.types import (
     is_instance,
     is_generic_collection,
@@ -47,6 +48,7 @@ def from_dict(data_class: Type[T], data: Data, config: Optional[Config] = None) 
     """
     init_values: MutableMapping[str, Any] = {}
     post_init_values: MutableMapping[str, Any] = {}
+    missing_post_init_fields: List[str] = []
     config = config or Config()
 
     try:
@@ -72,6 +74,11 @@ def from_dict(data_class: Type[T], data: Data, config: Optional[Config] = None) 
                 raise
             if config.check_types and not is_instance(value, field_type):
                 raise WrongTypeError(field_path=field.name, field_type=field_type, value=value)
+        elif config.partial:
+            if not field.init:
+                missing_post_init_fields.append(field.name)
+                continue
+            value = MISSING
         else:
             try:
                 value = get_default_value_for_field(field, field_type)
@@ -84,10 +91,18 @@ def from_dict(data_class: Type[T], data: Data, config: Optional[Config] = None) 
         elif not is_frozen(data_class):
             post_init_values[field.name] = value
 
-    instance = data_class(**init_values)
+    if config.partial:
+        instance = data_class(**init_values)
+        for key, value in post_init_values.items():
+            setattr(instance, key, value)
+        set_missing = object.__setattr__ if is_frozen(data_class) else setattr
+        for key in missing_post_init_fields:
+            set_missing(instance, key, MISSING)
+    else:
+        instance = data_class(**init_values)
 
-    for key, value in post_init_values.items():
-        setattr(instance, key, value)
+        for key, value in post_init_values.items():
+            setattr(instance, key, value)
 
     return instance
 

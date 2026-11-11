@@ -112,6 +112,7 @@ Configuration is a (data) class with following fields:
 - `strict`
 - `strict_unions_match`
 - `convert_key`
+- `partial`
 
 The examples below show all features of `from_dict` function and usage
 of all `Config` parameters.
@@ -408,6 +409,51 @@ exception.
 returns instance of this type. It means that it's possible that there are other 
 matching types further on the `Union` types list. With `strict_unions_match` 
 only a single match is allowed, otherwise `dacite` raises `StrictUnionMatchError`.
+
+### Partial (patch) mode
+
+For incremental updates you often need to distinguish three states of every
+field: the field was not provided (leave it untouched), an explicit `None`
+(clear the field) and an actual value (replace it). Set `Config.partial` to
+`True` and missing fields are no longer filled with defaults or `None` -
+they are set to the `MISSING` sentinel instead, so the patch model itself
+tells you which fields were submitted without looking back at the raw
+dictionary.
+
+```python
+from dacite import Config, MISSING, from_dict
+
+@dataclass
+class User:
+    name: str
+    age: Optional[int]
+
+patch = from_dict(User, {'age': None}, Config(partial=True))
+
+assert patch == User(name=MISSING, age=None)
+```
+
+A missing nested object and an explicitly provided empty object are also
+different: the former yields `MISSING`, while the latter is built as a nested
+patch whose own missing fields are `MISSING`.
+
+```python
+@dataclass
+class Address:
+    city: str
+    zip_code: Optional[str]
+
+@dataclass
+class User:
+    address: Optional[Address]
+
+assert from_dict(User, {}, Config(partial=True)).address is MISSING
+assert from_dict(User, {'address': {}}, Config(partial=True)).address == Address(city=MISSING, zip_code=MISSING)
+```
+
+Type checking, type hooks and all other rules still apply to the values that
+were provided; only the handling of missing fields changes. Without
+`Config.partial` the regular required/default rules stay in force.
 
 ## Convert key
 
