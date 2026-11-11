@@ -120,3 +120,11 @@ class EmptyExpressionError(JMESPathError):
 
 class UnknownFunctionError(JMESPathError):
     pass
+
+
+class InvalidFunctionArgumentError(JMESPathError):
+    pass
+
+
+class AmbiguousFunctionResolutionError(JMESPathError):
+    pass

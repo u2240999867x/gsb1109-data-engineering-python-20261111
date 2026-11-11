@@ -37,6 +37,16 @@ REVERSE_TYPES_MAP = {
 
 def signature(*arguments):
     def _record_signature(func):
+        # Stacking the decorator records several overloads for the same
+        # function.  The outermost decorator runs last, so newly declared
+        # signatures are prepended and registration order is preserved.
+        signatures = getattr(func, 'signatures', None)
+        if signatures is None:
+            signatures = []
+        func.signatures = [arguments] + signatures
+        # Keep a single ``signature`` attribute pointing at the most recently
+        # declared overload for backwards compatibility with code that only
+        # registers one signature per function.
         func.signature = arguments
         return func
     return _record_signature
@@ -55,11 +65,11 @@ class FunctionRegistry(type):
         for name, method in get_methods(cls):
             if not name.startswith('_func_'):
                 continue
-            signature = getattr(method, 'signature', None)
-            if signature is not None:
+            signatures = getattr(method, 'signatures', None)
+            if signatures is not None:
                 function_table[name[6:]] = {
                     'function': method,
-                    'signature': signature,
+                    'signatures': signatures,
                 }
         cls.FUNCTION_TABLE = function_table
 
@@ -76,28 +86,60 @@ class Functions(metaclass=FunctionRegistry):
             raise exceptions.UnknownFunctionError(
                 "Unknown function: %s()" % function_name)
         function = spec['function']
-        signature = spec['signature']
-        self._validate_arguments(resolved_args, signature, function_name)
+        signatures = spec['signatures']
+        if len(signatures) == 1:
+            # A single registered signature keeps its original strict
+            # validation and error types.
+            self._validate_arguments(resolved_args, signatures[0],
+                                     function_name)
+        else:
+            self._match_signature(resolved_args, signatures, function_name)
         return function(self, *resolved_args)
 
-    def _validate_arguments(self, args, signature, function_name):
+    def _match_signature(self, args, signatures, function_name):
+        matches = []
+        for candidate in signatures:
+            if self._matches_arity(args, candidate):
+                if self._type_check(args, candidate, function_name,
+                                    raise_on_error=False):
+                    matches.append(candidate)
+        if not matches:
+            raise exceptions.InvalidFunctionArgumentError(
+                "Cannot find a signature of function %s() that matches the "
+                "supplied arguments" % function_name)
+        if len(matches) > 1:
+            raise exceptions.AmbiguousFunctionResolutionError(
+                "Ambiguous resolution for function %s(): %d signatures match "
+                "the supplied arguments" % (function_name, len(matches)))
+        return matches[0]
+
+    def _matches_arity(self, args, signature):
         if signature and signature[-1].get('variadic'):
-            if len(args) < len(signature):
+            return len(args) >= len(signature)
+        return len(args) == len(signature)
+
+    def _validate_arguments(self, args, signature, function_name):
+        if not self._matches_arity(args, signature):
+            if signature and signature[-1].get('variadic'):
                 raise exceptions.VariadictArityError(
                     len(signature), len(args), function_name)
-        elif len(args) != len(signature):
             raise exceptions.ArityError(
                 len(signature), len(args), function_name)
         return self._type_check(args, signature, function_name)
 
-    def _type_check(self, actual, signature, function_name):
+    def _type_check(self, actual, signature, function_name,
+                    raise_on_error=True):
         for i in range(len(signature)):
             allowed_types = signature[i]['types']
             if allowed_types:
-                self._type_check_single(actual[i], allowed_types,
-                                        function_name)
+                if not self._type_check_single(
+                        actual[i], allowed_types, function_name,
+                        raise_on_error=raise_on_error):
+                    return False
+        return True
 
-    def _type_check_single(self, current, types, function_name):
+    def _type_check_single(self, current, types, function_name,
+                           raise_on_error=True):
         # Type checking involves checking the top level type,
         # and in the case of arrays, potentially checking the types
         # of each element.
@@ -108,6 +150,8 @@ class Functions(metaclass=FunctionRegistry):
         # integers in python for example).
         actual_typename = type(current).__name__
         if actual_typename not in allowed_types:
+            if not raise_on_error:
+                return False
             raise exceptions.JMESPathTypeError(
                 function_name, current,
                 self._convert_to_jmespath_type(actual_typename), types)
@@ -117,8 +161,10 @@ class Functions(metaclass=FunctionRegistry):
         # list of numbers or a list of strings).
         # Arrays are the only types that can have subtypes.
         if allowed_subtypes:
-            self._subtype_check(current, allowed_subtypes,
-                                types, function_name)
+            return self._subtype_check(current, allowed_subtypes,
+                                       types, function_name,
+                                       raise_on_error=raise_on_error)
+        return True
 
     def _get_allowed_pytypes(self, types):
         allowed_types = []
@@ -133,7 +179,8 @@ class Functions(metaclass=FunctionRegistry):
             allowed_types.extend(REVERSE_TYPES_MAP[type_])
         return allowed_types, allowed_subtypes
 
-    def _subtype_check(self, current, allowed_subtypes, types, function_name):
+    def _subtype_check(self, current, allowed_subtypes, types, function_name,
+                       raise_on_error=True):
         if len(allowed_subtypes) == 1:
             # The easy case, we know up front what type
             # we need to validate.
@@ -141,6 +188,8 @@ class Functions(metaclass=FunctionRegistry):
             for element in current:
                 actual_typename = type(element).__name__
                 if actual_typename not in allowed_subtypes:
+                    if not raise_on_error:
+                        return False
                     raise exceptions.JMESPathTypeError(
                         function_name, element, actual_typename, types)
         elif len(allowed_subtypes) > 1 and current:
@@ -153,13 +202,18 @@ class Functions(metaclass=FunctionRegistry):
                     allowed = subtypes
                     break
             else:
+                if not raise_on_error:
+                    return False
                 raise exceptions.JMESPathTypeError(
                     function_name, current[0], first, types)
             for element in current:
                 actual_typename = type(element).__name__
                 if actual_typename not in allowed:
+                    if not raise_on_error:
+                        return False
                     raise exceptions.JMESPathTypeError(
                         function_name, element, actual_typename, types)
+        return True
 
     @signature({'types': ['number']})
     def _func_abs(self, arg):

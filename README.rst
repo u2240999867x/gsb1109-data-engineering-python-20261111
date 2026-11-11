@@ -174,6 +174,47 @@ Below are a few examples:
             options=options)
     )
 
+Overloading a function with multiple signatures
+------------------------------------------------
+
+The same function can be registered more than once by stacking several
+``@signature`` decorators on a single method.  Each decorator declares one
+overload and the implementation is chosen from the actual resolved arguments.
+This is useful when different vendors (or argument kinds) need the same
+function name, for example one implementation for strings and another for
+numbers:
+
+.. code:: python
+
+    class VendorFunctions(functions.Functions):
+
+        @functions.signature({'types': ['string']})
+        @functions.signature({'types': ['number']})
+        def _func_normalize(self, value):
+            if isinstance(value, str):
+                return value.strip().lower()
+            return round(value, 2)
+
+    options = jmespath.Options(custom_functions=VendorFunctions())
+    jmespath.search("normalize('  Hello ')", {}, options=options)  # 'hello'
+    jmespath.search('normalize(`3.14159`)', {}, options=options)  # 3.14
+
+For every call each registered signature is checked against the argument
+arity and types; the outcome never depends on the order in which the
+signatures were declared:
+
+* Exactly one matching signature calls the function.
+* No matching signature raises an ``InvalidFunctionArgumentError``.
+* More than one matching signature raises an
+  ``AmbiguousFunctionResolutionError``.
+
+This also covers empty arrays (an empty array matches both an
+``array-string`` and an ``array-number`` overload, which is therefore
+reported as ambiguous), array element types, and variadic arguments.
+Functions decorated with a single ``@signature`` continue to validate and
+raise the same ``ArityError``, ``VariadictArityError`` and
+``JMESPathTypeError`` as before.
+
 Again, if you come up with useful functions that you think make
 sense in the JMESPath language (and make sense to implement in all
 JMESPath libraries, not just python), please let us know at
