@@ -1,0 +1,12 @@
+.pytest_cache/
+*.pyc
+dist/
+*.egg-info/
+build/
+.idea
+
+venv*
+dacite-env*
+
+.benchmarks
+benchmark.json
