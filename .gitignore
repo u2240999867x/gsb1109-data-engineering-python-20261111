@@ -1,0 +1,12 @@
+.DS_Store
+*.pyc
+*.swp
+*.swo
+*.egg-info
+docs/_build
+dist
+.coverage
+build
+.proof
+.ipynb_checkpoints
+.idea
