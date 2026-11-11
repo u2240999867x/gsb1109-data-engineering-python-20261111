@@ -1,7 +1,7 @@
 import sys
 import pytest
 
-from boltons.dictutils import OMD, OneToOne, ManyToMany, FrozenDict, subdict, FrozenHashError
+from boltons.dictutils import OMD, OneToOne, ManyToMany, FrozenDict, subdict, FrozenHashError, IndexedOrderedMultiDict
 from boltons.urlutils import QueryParamDict
 
 
@@ -678,3 +678,161 @@ def test_frozendict_api():
 
     import copy
     assert copy.copy(fd) is fd
+
+
+def test_iomd_basic_inverse():
+    iomd = IndexedOrderedMultiDict([('alice', 'A1'), ('bob', 'B2')])
+    iomd.add('alice', 'A3')
+
+    assert iomd.getlist('alice') == ['A1', 'A3']
+    assert iomd.inv['A1'] == 'alice'
+    assert iomd.inv.getlist('A1') == ['alice']
+    assert iomd.inv.getlist('B2') == ['bob']
+
+
+def test_iomd_duplicates_and_order():
+    iomd = IndexedOrderedMultiDict()
+    iomd.add('a', 1)
+    iomd.add('b', 1)
+    iomd.add('a', 1)
+
+    assert iomd.getlist('a') == [1, 1]
+    assert iomd.inv.getlist(1) == ['a', 'b', 'a']
+    assert iomd.inv.items(multi=True) == [(1, 'a'), (1, 'b'), (1, 'a')]
+
+
+def test_iomd_remove_single_pair():
+    iomd = IndexedOrderedMultiDict([('a', 1), ('a', 2), ('a', 1)])
+
+    iomd.remove('a', 1)  # removes the most-recently-inserted occurrence
+    assert iomd.getlist('a') == [1, 2]
+    assert iomd.inv.getlist(1) == ['a']
+    assert iomd.inv.getlist(2) == ['a']
+
+    with pytest.raises(KeyError):
+        iomd.remove('a', 3)
+    with pytest.raises(KeyError):
+        iomd.remove('missing', 1)
+
+
+def test_iomd_remove_all_pairs_distinct_from_remove():
+    iomd = IndexedOrderedMultiDict([('a', 1), ('a', 2), ('b', 1)])
+    assert iomd.popall('a') == [1, 2]
+    assert 'a' not in iomd
+    assert iomd.inv.getlist(1) == ['b']
+    assert iomd.inv.getlist(2) == []
+
+    iomd = IndexedOrderedMultiDict([('a', 1), ('a', 2), ('b', 1)])
+    del iomd['a']
+    assert 'a' not in iomd
+    assert iomd.inv.getlist(1) == ['b']
+    assert iomd.inv.getlist(2) == []
+
+    iomd = IndexedOrderedMultiDict([('a', 1), ('a', 1)])
+    assert iomd.pop('a') == 1
+    assert 'a' not in iomd
+    assert iomd.inv.getlist(1) == []
+
+
+def test_iomd_unhashable_values_rejected():
+    iomd = IndexedOrderedMultiDict()
+
+    with pytest.raises(TypeError):
+        iomd.add('a', [])
+    with pytest.raises(TypeError):
+        iomd['a'] = {}
+    with pytest.raises(TypeError):
+        iomd.addlist('a', [1, []])
+    with pytest.raises(TypeError):
+        iomd.update({'a': []})
+    with pytest.raises(TypeError):
+        iomd.update_extend([('a', [])])
+    with pytest.raises(TypeError):
+        iomd.setdefault('a', [])
+    with pytest.raises(TypeError):
+        IndexedOrderedMultiDict([('a', [])])
+
+    # nothing leaked into either view
+    assert len(iomd) == 0
+    assert len(iomd.inv) == 0
+    assert iomd.items(multi=True) == []
+
+
+def test_iomd_setitem_replaces_and_syncs():
+    iomd = IndexedOrderedMultiDict([('a', 1), ('a', 2), ('b', 1)])
+    iomd['a'] = 3
+
+    assert iomd.getlist('a') == [3]
+    assert iomd.inv.getlist(1) == ['b']
+    assert iomd.inv.getlist(2) == []
+    assert iomd.inv.getlist(3) == ['a']
+
+
+def test_iomd_poplast_syncs():
+    iomd = IndexedOrderedMultiDict([('a', 1), ('b', 2), ('a', 3)])
+
+    assert iomd.poplast('a') == 3
+    assert iomd.inv.getlist(3) == []
+    assert iomd.poplast() == 2
+    assert iomd.inv.getlist(2) == []
+    assert iomd.items(multi=True) == [('a', 1)]
+    assert iomd.inv.items(multi=True) == [(1, 'a')]
+
+
+def test_iomd_inverse_mutations_visible_forward():
+    iomd = IndexedOrderedMultiDict([('a', 1)])
+
+    iomd.inv.add(1, 'b')
+    assert iomd.getlist('b') == [1]
+
+    iomd.inv.remove(1, 'a')
+    assert 'a' not in iomd
+    assert iomd.inv.getlist(1) == ['b']
+
+    iomd.inv[2] = 'c'
+    assert iomd.getlist('c') == [2]
+
+    del iomd.inv[1]
+    assert 'b' not in iomd
+    assert iomd.items(multi=True) == [('c', 2)]
+
+
+def test_iomd_update_syncs():
+    iomd = IndexedOrderedMultiDict([('a', 1)])
+    iomd.update({'a': 2, 'b': 3})
+
+    assert iomd.getlist('a') == [2]
+    assert iomd.inv.getlist(1) == []
+    assert iomd.inv.getlist(2) == ['a']
+    assert iomd.inv.getlist(3) == ['b']
+
+    iomd.update_extend([('a', 4)])
+    assert iomd.getlist('a') == [2, 4]
+    assert iomd.inv.getlist(4) == ['a']
+
+
+def test_iomd_clear_and_copy():
+    iomd = IndexedOrderedMultiDict([('a', 1), ('b', 2)])
+
+    copied = iomd.copy()
+    assert copied.items(multi=True) == iomd.items(multi=True)
+    assert copied.inv.items(multi=True) == iomd.inv.items(multi=True)
+
+    copied.add('c', 3)
+    assert 'c' not in iomd
+    assert 3 not in iomd.inv
+
+    iomd.clear()
+    assert len(iomd) == 0
+    assert len(iomd.inv) == 0
+    assert iomd.items(multi=True) == []
+
+
+def test_iomd_pickle_roundtrip():
+    import pickle
+
+    iomd = IndexedOrderedMultiDict([('a', 1), ('b', 2), ('a', 3)])
+    rt = pickle.loads(pickle.dumps(iomd))
+
+    assert rt.items(multi=True) == iomd.items(multi=True)
+    assert rt.inv.items(multi=True) == iomd.inv.items(multi=True)

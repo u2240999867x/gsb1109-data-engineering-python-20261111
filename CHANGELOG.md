@@ -9,6 +9,7 @@ scheme (`YY.MINOR.MICRO`).
 
 _(unreleased)_
 
+- Added [`dictutils.IndexedOrderedMultiDict`][dictutils.IndexedOrderedMultiDict], an `OrderedMultiDict` maintaining a synchronized inverse view (`.inv`) with duplicate counts and insertion order preserved in both directions
 - Added `key` and `reverse` support to [`listutils.BarrelList.sort`][listutils.BarrelList.sort] ([#550](https://github.com/mahmoud/boltons/pull/550))
 - Added `start` and `stop` support to [`listutils.BarrelList.index`][listutils.BarrelList.index] ([#592](https://github.com/mahmoud/boltons/pull/592))
 - Added timezone suffix support (`Z`, `+HH:MM`, `-HHMM`, optional seconds) to [`timeutils.isoparse`][timeutils.isoparse], returning aware datetimes so aware `isoformat()` output round-trips ([#594](https://github.com/mahmoud/boltons/pull/594))
@@ -1239,6 +1240,7 @@ added in this release.
 [dictutils.OMD.popall]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.OrderedMultiDict.popall
 [dictutils.OMD.setdefault]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.OrderedMultiDict.setdefault
 [dictutils.OrderedMultiDict]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.OrderedMultiDict
+[dictutils.IndexedOrderedMultiDict]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.IndexedOrderedMultiDict
 [dictutils.OrderedMultiDict.get_inverted]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.OrderedMultiDict.get_inverted
 [dictutils.OneToOne]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.OneToOne
 [dictutils.ManyToMany]: http://boltons.readthedocs.org/en/latest/dictutils.html#boltons.dictutils.ManyToMany

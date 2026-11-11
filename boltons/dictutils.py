@@ -80,7 +80,7 @@ except ImportError:
 PREV, NEXT, KEY, VALUE, SPREV, SNEXT = range(6)
 
 
-__all__ = ['MultiDict', 'OMD', 'OrderedMultiDict', 'OneToOne', 'ManyToMany', 'subdict', 'FrozenDict']
+__all__ = ['MultiDict', 'OMD', 'OrderedMultiDict', 'IndexedOrderedMultiDict', 'OneToOne', 'ManyToMany', 'subdict', 'FrozenDict']
 
 
 class OrderedMultiDict(dict):
@@ -754,6 +754,187 @@ class FastIterOrderedMultiDict(OrderedMultiDict):
                     break
             yield curr[KEY]
             curr = curr[PREV]
+
+
+# marker for the secret handshake used internally to link an
+# IndexedOrderedMultiDict with its inverse view
+_IOMD_INV_MARKER = object()
+
+
+class IndexedOrderedMultiDict(OrderedMultiDict):
+    """An :class:`OrderedMultiDict` (OMD) which maintains a synchronized
+    inverse view, exposed as the ``inv`` attribute. Where the OMD maps
+    one key to multiple values, the inverse view maps each value back to
+    the keys it was inserted under. Duplicate counts and insertion order
+    are preserved in both directions, and modifications made through
+    either view are immediately visible in the other.
+
+    >>> iomd = IndexedOrderedMultiDict([('alice', 'A1'), ('bob', 'B2')])
+    >>> iomd.add('alice', 'A3')
+    >>> iomd.getlist('alice')
+    ['A1', 'A3']
+    >>> iomd.inv['A1']
+    'alice'
+
+    Because values double as keys of the inverse view, they must be
+    hashable. Unsuitable values are rejected at insertion time, before
+    any mapping is stored:
+
+    >>> iomd.add('carol', ['unhashable'])
+    Traceback (most recent call last):
+    ...
+    TypeError: IndexedOrderedMultiDict values must be hashable ...
+
+    Removing a single pair is distinct from removing all pairs under a
+    key. Use :meth:`remove` for one pair, and :meth:`popall` (or
+    ``del``) for every pair under a key:
+
+    >>> iomd.add('alice', 'A1')
+    >>> iomd.getlist('alice')
+    ['A1', 'A3', 'A1']
+    >>> iomd.remove('alice', 'A1')
+    >>> iomd.getlist('alice')
+    ['A1', 'A3']
+    >>> iomd.inv.getlist('A1')
+    ['alice']
+    >>> iomd.popall('alice')
+    ['A1', 'A3']
+    >>> iomd.inv.getlist('A3')
+    []
+
+    The inverse view is itself an ``IndexedOrderedMultiDict``, so the
+    same operations work in the other direction:
+
+    >>> iomd.inv.add('B2', 'beth')
+    >>> iomd.getlist('beth')
+    ['B2']
+    >>> del iomd.inv['B2']
+    >>> iomd.getlist('bob')
+    []
+    """
+    def __init__(self, *args, **kwargs):
+        if args and args[0] is _IOMD_INV_MARKER:
+            self.inv = args[1]
+            super().__init__()
+            return
+        self.inv = self.__class__(_IOMD_INV_MARKER, self)
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _check_indexable(value):
+        try:
+            hash(value)
+        except TypeError:
+            raise TypeError('%s values must be hashable to serve as keys'
+                            ' of the inverse view, got unhashable value: %r'
+                            % (IndexedOrderedMultiDict.__name__, value)) from None
+
+    def _remove_pair(self, k, v):
+        # low-level removal of the most-recently-inserted (k, v) pair;
+        # does not touch the inverse view
+        try:
+            cells = self._map[k]
+        except KeyError:
+            raise KeyError((k, v)) from None
+        values = dict.__getitem__(self, k)
+        for idx in range(len(cells) - 1, -1, -1):
+            if cells[idx][VALUE] == v:
+                cell = cells.pop(idx)
+                cell[PREV][NEXT], cell[NEXT][PREV] = cell[NEXT], cell[PREV]
+                values.pop(idx)
+                break
+        else:
+            raise KeyError((k, v))
+        if not cells:
+            del self._map[k]
+            dict.__delitem__(self, k)
+
+    def add(self, k, v):
+        """Add a single value *v* under key *k*, mirroring the pair in the
+        inverse view. Raises :exc:`TypeError` if *v* is unhashable.
+        """
+        self._check_indexable(v)
+        super().add(k, v)
+        OrderedMultiDict.add(self.inv, v, k)
+
+    def addlist(self, k, values):
+        """Add an iterable of values under key *k*, mirroring each pair in
+        the inverse view. Raises :exc:`TypeError` before inserting
+        anything if any value is unhashable.
+        """
+        values = list(values)
+        for v in values:
+            self._check_indexable(v)
+        super().addlist(k, values)
+        inv_add = OrderedMultiDict.add
+        for v in values:
+            inv_add(self.inv, v, k)
+
+    def remove(self, k, v):
+        """Remove a single *(k, v)* pair, the most-recently inserted one,
+        from both the mapping and the inverse view. Raises
+        :exc:`KeyError` if the pair is not present.
+
+        Contrast with ``del iomd[k]`` and :meth:`popall`, which remove
+        every pair under key *k*.
+        """
+        self._remove_pair(k, v)
+        self.inv._remove_pair(v, k)
+
+    def __setitem__(self, k, v):
+        self._check_indexable(v)
+        old_values = self.getlist(k)
+        super().__setitem__(k, v)
+        inv = self.inv
+        for old_v in old_values:
+            inv._remove_pair(old_v, k)
+        OrderedMultiDict.add(inv, v, k)
+
+    def __delitem__(self, k):
+        old_values = self.getlist(k)
+        super().__delitem__(k)
+        inv = self.inv
+        for old_v in old_values:
+            inv._remove_pair(old_v, k)
+
+    def popall(self, k, default=_MISSING):
+        """Remove all values under key *k*, returning them as a list, and
+        remove the mirrored pairs from the inverse view. Raises
+        :exc:`KeyError` if the key is not present and no *default* is
+        provided.
+        """
+        old_values = self.getlist(k)
+        ret = super().popall(k, default)
+        inv = self.inv
+        for old_v in old_values:
+            inv._remove_pair(old_v, k)
+        return ret
+
+    def poplast(self, k=_MISSING, default=_MISSING):
+        """Remove and return the most-recently inserted value under key
+        *k*, also removing the mirrored pair from the inverse view. See
+        :meth:`OrderedMultiDict.poplast` for more details.
+        """
+        if k is _MISSING:
+            if not self:
+                if default is _MISSING:
+                    raise KeyError('empty %r' % type(self))
+                return default
+            k = self.root[PREV][KEY]
+        values = self.getlist(k)
+        if not values:
+            if default is _MISSING:
+                raise KeyError(k)
+            return default
+        v = values[-1]
+        super().poplast(k)
+        self.inv._remove_pair(v, k)
+        return v
+
+    def clear(self):
+        "Empty the dictionary and its inverse view."
+        super().clear()
+        OrderedMultiDict.clear(self.inv)
 
 
 _OTO_INV_MARKER = object()
