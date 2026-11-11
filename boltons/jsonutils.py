@@ -40,19 +40,58 @@ of working with `JSON Lines`_-formatted files.
 import io
 import os
 import json
+from collections import namedtuple
 
 
 DEFAULT_BLOCKSIZE = 4096
 
+#: A final line without a trailing newline makes :func:`reverse_iter_lines`
+#: raise :exc:`ValueError`, since it cannot be distinguished from a record
+#: that was only half-written when the file was read.
+INCOMPLETE_RAISE = 'raise'
+#: A final line without a trailing newline is silently skipped.
+INCOMPLETE_SKIP = 'skip'
+_INCOMPLETE_POLICIES = (INCOMPLETE_RAISE, INCOMPLETE_SKIP)
 
-__all__ = ['JSONLIterator', 'reverse_iter_lines']
+
+__all__ = ['JSONLIterator', 'ReverseLine', 'reverse_iter_lines',
+           'INCOMPLETE_RAISE', 'INCOMPLETE_SKIP']
 
 
-def reverse_iter_lines(file_obj, blocksize=DEFAULT_BLOCKSIZE, preseek=True, encoding=None):
+class ReverseLine(namedtuple('ReverseLine', 'line start end')):
+    """A line returned by :func:`reverse_iter_lines` when
+    ``with_ranges=True``.
+
+    ``line`` is the line content (decoded text or bytes), and ``start``
+    and ``end`` are the half-open byte offsets of that content in the
+    underlying stream, excluding the line terminator. Reading
+    ``stream[start:end]`` reproduces the exact bytes of ``line`` before
+    decoding. On text streams without a byte buffer (e.g.
+    :class:`io.StringIO`), the offsets are character positions instead.
+    """
+    __slots__ = ()
+
+
+def reverse_iter_lines(file_obj, blocksize=DEFAULT_BLOCKSIZE, preseek=True,
+                       encoding=None, with_ranges=False,
+                       incomplete=INCOMPLETE_RAISE):
     """Returns an iterator over the lines from a file object, in
     reverse order, i.e., last line first, first line last. Uses the
     :meth:`file.seek` method of file objects, and is tested compatible with
     :class:`file` objects, as well as :class:`StringIO.StringIO`.
+
+    Lines are located by scanning for ``\\n`` bytes, so multibyte
+    characters (e.g. UTF-8) are safe even when a character straddles a
+    block boundary: line content is reassembled before any decoding
+    happens. A ``\\r\\n`` (CRLF) terminator is recognized as a single
+    line ending and the trailing ``\\r`` is stripped from the line,
+    including when the ``\\r`` and ``\\n`` fall in different blocks. A
+    lone ``\\r`` inside a line is not treated as a terminator.
+
+    The file is only read and seeked; it is never truncated or written
+    to. Iteration is lazy and walks the file backwards in blocks of
+    *blocksize* bytes, so taking the first few results does not scan the
+    whole file.
 
     Args:
         file_obj (file): An open file object. Note that
@@ -62,7 +101,7 @@ def reverse_iter_lines(file_obj, blocksize=DEFAULT_BLOCKSIZE, preseek=True, enco
             text mode. Seek before reusing a text stream after iteration.
         blocksize (int): The block size to pass to
           :meth:`file.read()`. Warning: keep this a fairly large
-          multiple of 2, defaults to 4096.
+          multiple of 2, defaults to 4096. Must be a positive integer.
         preseek (bool): Tells the function whether or not to automatically
             seek to the end of the file. Defaults to ``True``.
             ``preseek=False`` is useful in cases when the
@@ -71,8 +110,23 @@ def reverse_iter_lines(file_obj, blocksize=DEFAULT_BLOCKSIZE, preseek=True, enco
             generation.
         encoding (str): Text encoding used to decode lines. Defaults to the
             file's encoding, or returns bytes when neither is specified.
+        with_ranges (bool): When ``True``, yield :class:`ReverseLine`
+            objects carrying the original byte range of each line
+            instead of bare lines. Defaults to ``False``.
+        incomplete (str): Policy for a final line with no trailing
+            newline, which may be a complete record or a half-written
+            one. ``'raise'`` (the default) raises :exc:`ValueError`;
+            ``'skip'`` excludes it from the results. The file is never
+            modified either way.
 
     """
+    if blocksize < 1:
+        raise ValueError('blocksize expected a positive integer,'
+                         ' not %r' % (blocksize,))
+    if incomplete not in _INCOMPLETE_POLICIES:
+        raise ValueError('incomplete expected one of %r, not %r'
+                         % (_INCOMPLETE_POLICIES, incomplete))
+
     # This function is a bit of a pain because it attempts to be byte/text agnostic
     encoding = encoding or getattr(file_obj, 'encoding', None)
 
@@ -87,33 +141,118 @@ def reverse_iter_lines(file_obj, blocksize=DEFAULT_BLOCKSIZE, preseek=True, enco
     # which has no .buffer to unwrap) or bytes
     empty = file_obj.read(0)
     is_text = isinstance(empty, str)
-    newline = '\n' if is_text else b'\n'
     decode = bool(encoding) and not is_text
-    empty_line = '' if (decode or is_text) else b''
+    newline = '\n' if is_text else b'\n'
+    carriage_return = '\r' if is_text else b'\r'
 
     if preseek:
         file_obj.seek(0, os.SEEK_END)
-    buff = empty
+
     cur_pos = file_obj.tell()
-    while 0 < cur_pos:
+    if cur_pos == 0:
+        return
+
+    # The incomplete-line policy only applies to a tail at the physical
+    # end of the file. With preseek=False the cursor may delimit an
+    # arbitrary reverse-read window, so a chunk cut off at the cursor is
+    # a window boundary, not necessarily a half-written record.
+    if preseek:
+        at_eof = True
+    else:
+        file_obj.seek(0, os.SEEK_END)
+        at_eof = (cur_pos == file_obj.tell())
+        file_obj.seek(cur_pos, os.SEEK_SET)
+
+    # When skipping an unterminated tail, the scan runs over the bytes
+    # preceding it. suppress_start marks the single empty segment that
+    # split() places after the newline right before the removed tail;
+    # that segment is a ghost of the tail, not a real blank line.
+    suppress_start = None
+
+    if at_eof:
+        # A final line with no trailing newline is ambiguous: it can be a
+        # complete record or a record still being appended. Locate where it
+        # starts (just after the preceding newline) by walking backwards in
+        # blocks, then apply the explicit incomplete-line policy. The file
+        # itself is never touched beyond reads.
+        file_obj.seek(cur_pos - 1, os.SEEK_SET)
+        if file_obj.read(1) != newline:
+            chunk_end = cur_pos
+            tail_start = 0
+            while chunk_end > 0:
+                read_size = min(blocksize, chunk_end)
+                chunk_start = chunk_end - read_size
+                file_obj.seek(chunk_start, os.SEEK_SET)
+                chunk = file_obj.read(read_size)
+                newline_idx = chunk.rfind(newline)
+                if newline_idx != -1:
+                    tail_start = chunk_start + newline_idx + 1
+                    break
+                chunk_end = chunk_start
+
+            if incomplete == INCOMPLETE_RAISE:
+                raise ValueError(
+                    'final line at byte range [%d, %d) has no trailing newline'
+                    ' and may be a partially written record; pass'
+                    ' incomplete="skip" to exclude it'
+                    % (tail_start, cur_pos))
+            # Keep everything up to and including the newline at
+            # tail_start - 1, then drop the empty segment at tail_start
+            # that split() would otherwise emit as the tail's ghost.
+            # Genuine blank lines before that newline keep their ranges.
+            # The original file is not modified.
+            if tail_start == 0:
+                return
+            cur_pos = tail_start
+            suppress_start = tail_start
+
+    # buff holds the reassembled, not-yet-emitted tail of the scan, with
+    # buff_start its absolute offset in the stream.
+    buff = empty
+    buff_start = cur_pos
+    while cur_pos > 0:
         read_size = min(blocksize, cur_pos)
         cur_pos -= read_size
         file_obj.seek(cur_pos, os.SEEK_SET)
-        cur = file_obj.read(read_size)
-        buff = cur + buff
-        lines = buff.splitlines()
+        buff = file_obj.read(read_size) + buff
+        buff_start = cur_pos
 
-        # until the start of the file, the first line may be partial
-        if cur_pos and (len(lines) < 2 or lines[0] == empty):
+        # split on \n only; UTF-8 continuation bytes and lone \r are
+        # never line terminators, and CRLF's \r is stripped per line below
+        parts = buff.split(newline)
+        if cur_pos > 0 and len(parts) < 2:
+            # no complete terminator inside the window yet
             continue
-        if buff[-1:] == newline:
-            yield empty_line
-        for line in reversed(lines[1:] if cur_pos else lines):
-            yield line.decode(encoding) if decode else line
-        buff = lines[0] if cur_pos else empty
-    if buff:
-        yield buff.decode(encoding) if decode else buff
 
+        starts = []
+        offset = buff_start
+        for part in parts:
+            starts.append(offset)
+            offset += len(part) + 1  # content plus its newline
+
+        for idx in range(len(parts) - 1, -1, -1):
+            if cur_pos > 0 and idx == 0:
+                # parts[0] may continue into the next block downwards
+                break
+            part = parts[idx]
+            start = starts[idx]
+            if start == suppress_start:
+                # empty segment left where the skipped tail began; not a
+                # real blank line
+                continue
+            end = start + len(part)
+            if part[-1:] == carriage_return:
+                # CRLF terminator: keep the \r out of line and its range
+                part = part[:-1]
+                end -= 1
+            line = part.decode(encoding) if decode else part
+            if with_ranges:
+                yield ReverseLine(line, start, end)
+            else:
+                yield line
+
+        buff = parts[0]
+        # parts[0] starts at buff_start, so buff_start is unchanged
 
 
 """
@@ -131,6 +270,12 @@ class JSONLIterator:
     bottom of files, making it very effective for reading in simple
     append-only JSONL use cases. It also has the ability to start from
     anywhere in the file and ignore corrupted lines.
+
+    A final line without a trailing newline cannot be told apart from a
+    record that is still being appended, so reverse iteration skips it
+    (see :func:`reverse_iter_lines`'s ``incomplete`` argument). Forward
+    iteration still surfaces it, where ``ignore_errors`` decides what
+    happens if it does not parse.
 
     Args:
         file_obj (file): An open file object.
@@ -165,9 +310,12 @@ class JSONLIterator:
         if rel_seek is not None:
             self._init_rel_seek()
         if self._reverse:
+            # An unterminated final line might be a half-written record,
+            # so skip it rather than guess; the caller's file is untouched.
             self._line_iter = reverse_iter_lines(self._file_obj,
                                                  blocksize=self._blocksize,
-                                                 preseek=False)
+                                                 preseek=False,
+                                                 incomplete=INCOMPLETE_SKIP)
         else:
             # readline() (unlike next()) keeps tell() usable on text files
             self._line_iter = iter(self._file_obj.readline,
