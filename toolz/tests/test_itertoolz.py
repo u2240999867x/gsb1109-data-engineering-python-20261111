@@ -5,6 +5,7 @@ from functools import partial
 from random import Random
 from pickle import dumps, loads
 from toolz.itertoolz import (remove, groupby, merge_sorted,
+                             merge_sorted_dedup,
                              concat, concatv, interleave, unique,
                              isiterable, getter,
                              mapcat, isdistinct, first, second,
@@ -92,6 +93,72 @@ def test_merge_sorted():
         1, 2, 3, 4, 5]
     assert list(merge_sorted([1, 5], [2], [4, 7], [3, 6], key=identity)) == [
         1, 2, 3, 4, 5, 6, 7]
+
+
+def test_merge_sorted_dedup():
+    # overlapping shard boundaries deduplicated by identity
+    shard1 = [(1, 'a'), (2, 'b'), (3, 'c')]
+    shard2 = [(3, 'c'), (4, 'd'), (5, 'e')]
+    assert list(merge_sorted_dedup(shard1, shard2)) == [
+        (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e')]
+
+    # same timestamp but distinct events are all kept
+    shard1 = [(1, 'a'), (2, 'b')]
+    shard2 = [(2, 'x'), (2, 'b'), (3, 'y')]
+    assert list(merge_sorted_dedup(shard1, shard2,
+                                   key=lambda r: r[0],
+                                   identity=lambda r: r[1])) == [
+        (1, 'a'), (2, 'x'), (2, 'b'), (3, 'y')]
+
+    # explicit half-open time window [start, end)
+    shard1 = [(1, 'a'), (2, 'b'), (3, 'c')]
+    shard2 = [(3, 'c'), (4, 'd')]
+    assert list(merge_sorted_dedup(shard1, shard2, key=lambda r: r[0],
+                                   start=2, end=4)) == [(2, 'b'), (3, 'c')]
+    assert list(merge_sorted_dedup(shard1, shard2, key=lambda r: r[0],
+                                   start=3)) == [(3, 'c'), (4, 'd')]
+    assert list(merge_sorted_dedup(shard1, shard2, key=lambda r: r[0],
+                                   end=2)) == [(1, 'a')]
+
+    # dict records, like offline event batches
+    shard1 = [{'id': 1, 't': 1}, {'id': 2, 't': 2}, {'id': 3, 't': 3}]
+    shard2 = [{'id': 3, 't': 3}, {'id': 4, 't': 3}, {'id': 5, 't': 4}]
+    assert list(merge_sorted_dedup(shard1, shard2,
+                                   key=lambda e: e['t'],
+                                   identity=lambda e: e['id'])) == [
+        {'id': 1, 't': 1}, {'id': 2, 't': 2}, {'id': 3, 't': 3},
+        {'id': 4, 't': 3}, {'id': 5, 't': 4}]
+
+    # edge cases
+    assert list(merge_sorted_dedup()) == []
+    assert list(merge_sorted_dedup([], [])) == []
+    assert list(merge_sorted_dedup([1, 2, 3])) == [1, 2, 3]
+    assert list(merge_sorted_dedup([1, 2], [], [2, 3])) == [1, 2, 3]
+
+    # laziness: only consumes as much as needed
+    it = merge_sorted_dedup(iter([1, 2, 3]), iter([1, 2, 3]))
+    assert next(it) == 1
+
+
+def test_merge_sorted_dedup_unsorted():
+    # out-of-order input is reported with the offending stream index
+    assert raises(ValueError,
+                  lambda: list(merge_sorted_dedup([1, 2, 3], [4, 2, 5])))
+    assert raises(ValueError,
+                  lambda: list(merge_sorted_dedup([3, 1], [1, 2])))
+    try:
+        list(merge_sorted_dedup([1, 2, 3], [4, 2, 5]))
+    except ValueError as e:
+        assert 'stream 1' in str(e)
+
+    # key function is used for the ordering check
+    try:
+        list(merge_sorted_dedup([{'t': 2}, {'t': 1}], key=lambda e: e['t']))
+    except ValueError as e:
+        assert 'stream 0' in str(e)
+
+    # plain merge_sorted remains usable and does not raise
+    assert list(merge_sorted([3, 1], key=lambda x: x % 3)) == [3, 1]
 
 
 def test_interleave():

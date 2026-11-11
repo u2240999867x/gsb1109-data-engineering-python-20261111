@@ -47,6 +47,7 @@ from toolz import (
     last,
     memoize,
     merge_sorted,
+    merge_sorted_dedup,
     peek,
     pipe,
     second,

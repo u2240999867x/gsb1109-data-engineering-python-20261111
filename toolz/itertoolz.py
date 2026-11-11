@@ -8,7 +8,8 @@ from collections.abc import Sequence
 from toolz.utils import no_default
 
 
-__all__ = ('remove', 'accumulate', 'groupby', 'merge_sorted', 'interleave',
+__all__ = ('remove', 'accumulate', 'groupby', 'merge_sorted',
+           'merge_sorted_dedup', 'interleave',
            'unique', 'isiterable', 'isdistinct', 'take', 'drop', 'take_nth',
            'first', 'second', 'nth', 'last', 'get', 'concat', 'concatv',
            'mapcat', 'cons', 'interpose', 'frequencies', 'reduceby', 'iterate',
@@ -213,6 +214,116 @@ def _merge_sorted_binary_key(seqs, key):
         return
     yield val1
     yield from seq1
+
+
+def merge_sorted_dedup(*seqs, key=None, identity=None, start=None, end=None):
+    """ Merge sorted streams, dropping duplicate records, within a time window
+
+    Like ``merge_sorted``, but geared towards stitching together sharded
+    event logs (e.g. offline batches) that overlap slightly at their
+    boundaries.
+
+    Each input stream must already be sorted by ``key`` (the record itself
+    if no key is given).  This precondition is checked lazily as the
+    streams are consumed; if a stream is found out of order a ``ValueError``
+    is raised naming the offending stream, rather than silently re-sorting.
+
+    Records are deduplicated by ``identity``: when several streams deliver
+    a record with the same identity (the overlapping tail/head of adjacent
+    shards) only the first occurrence is emitted.  Distinct records that
+    merely share the same timestamp are all kept.  Identities must be
+    hashable; duplicate records are expected to carry equal sort keys, so
+    deduplication only needs to look within a run of equal keys and memory
+    stays bounded.
+
+    Only records whose key falls in the half-open window
+    ``[start, end)`` are emitted; either bound may be ``None`` to leave
+    that side open.
+
+    >>> shard1 = [{'id': 1, 't': 1}, {'id': 2, 't': 2}, {'id': 3, 't': 3}]
+    >>> shard2 = [{'id': 3, 't': 3}, {'id': 4, 't': 3}, {'id': 5, 't': 4}]
+    >>> list(merge_sorted_dedup(shard1, shard2,
+    ...                         key=lambda e: e['t'],
+    ...                         identity=lambda e: e['id'])) == [
+    ...     {'id': 1, 't': 1}, {'id': 2, 't': 2}, {'id': 3, 't': 3},
+    ...     {'id': 4, 't': 3}, {'id': 5, 't': 4}]
+    True
+
+    >>> list(merge_sorted_dedup(shard1, shard2, key=lambda e: e['t'],
+    ...                         identity=lambda e: e['id'], start=2, end=4))
+    [{'id': 2, 't': 2}, {'id': 3, 't': 3}, {'id': 4, 't': 3}]
+
+    >>> list(merge_sorted_dedup([1, 3, 2], [0]))
+    Traceback (most recent call last):
+    ...
+    ValueError: stream 0 is not sorted: key 2 follows 3
+
+    See Also:
+        merge_sorted : plain k-way merge without deduplication
+    """
+    time_of = key if key is not None else _identity
+    id_of = identity if identity is not None else _identity
+    streams = [_check_sorted(seq, time_of, i) for i, seq in enumerate(seqs)]
+    return _merge_sorted_dedup(streams, time_of, id_of, start, end)
+
+
+def _identity(x):
+    return x
+
+
+def _check_sorted(seq, key, index):
+    it = iter(seq)
+    try:
+        prev = next(it)
+    except StopIteration:
+        return
+    prev_key = key(prev)
+    yield prev
+    for val in it:
+        val_key = key(val)
+        if val_key < prev_key:
+            raise ValueError(
+                "stream %d is not sorted: key %r follows %r"
+                % (index, val_key, prev_key))
+        yield val
+        prev_key = val_key
+
+
+def _merge_sorted_dedup(streams, time_of, id_of, start, end):
+    heap = []
+    order = itertools.count()
+    for index, stream in enumerate(streams):
+        try:
+            val = next(stream)
+        except StopIteration:
+            continue
+        heap.append((time_of(val), next(order), index, val, stream))
+    heapq.heapify(heap)
+
+    group_key = no_default
+    group_ids = set()
+    while heap:
+        val_key, _, index, val, stream = heapq.heappop(heap)
+        try:
+            nxt = next(stream)
+            heapq.heappush(heap,
+                           (time_of(nxt), next(order), index, nxt, stream))
+        except StopIteration:
+            pass
+
+        if start is not None and val_key < start:
+            continue
+        if end is not None and val_key >= end:
+            return
+
+        if val_key != group_key:
+            group_key = val_key
+            group_ids = set()
+        record_id = id_of(val)
+        if record_id in group_ids:
+            continue
+        group_ids.add(record_id)
+        yield val
 
 
 def interleave(seqs):
