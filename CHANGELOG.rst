@@ -1,7 +1,13 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add ``flat_map(array, &expression)``, an opt-in preserving expansion that
+  keeps parent rows whose detail is empty, missing or null instead of
+  dropping them like a projection.  Empty details are marked ``empty``,
+  absent fields ``missing`` and explicit nulls ``null``; every expanded row
+  retains the parent path and nested details can be expanded again.
+* Add ``mark_missing(array, field)`` for one-to-one quality audits that tag
+  missing fields and nulls without changing the number of rows.
 
 
 1.1.0

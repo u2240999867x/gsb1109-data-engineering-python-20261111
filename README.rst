@@ -101,6 +101,52 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Preserving Expansions
+---------------------
+
+A projection drops any parent whose nested value is empty, missing or
+null, so an order without line items disappears entirely once the line
+items are expanded.  The ``flat_map`` function provides an opt-in
+expansion that keeps every parent row instead:
+
+.. code:: python
+
+    >>> import jmespath
+    >>> orders = [
+    ...     {'order_id': 'O1', 'items': [{'sku': 'A'}, {'sku': 'B'}]},
+    ...     {'order_id': 'O2', 'items': []},
+    ...     {'order_id': 'O3'},
+    ...     {'order_id': 'O4', 'items': None},
+    ... ]
+    >>> jmespath.search('flat_map(@, &items)', orders)
+    [{'order_id': 'O1', 'items': [{'sku': 'A'}, {'sku': 'B'}], 'sku': 'A'},
+     {'order_id': 'O1', 'items': [{'sku': 'A'}, {'sku': 'B'}], 'sku': 'B'},
+     {'order_id': 'O2', 'items': [], '_status': 'empty'},
+     {'order_id': 'O3', '_status': 'missing', '_field': 'items'},
+     {'order_id': 'O4', 'items': None, '_status': 'null', '_field': 'items'}]
+
+Each row keeps the full parent path.  Two details still produce exactly
+two rows; no global ``null`` is inserted to pad the result back to the
+number of parents.  The ``_status`` markers distinguish an empty detail
+(``empty``), an absent field (``missing``) and an explicit ``null``
+(``null``), which makes quality-report filtering such as
+``flat_map(@, &items)[?_status != `null`]`` possible.  Nested details can
+be expanded again with another ``flat_map`` call and continue to carry
+the parent path.
+
+For a one-to-one audit that does not change the number of rows,
+``mark_missing(array, field)`` tags each element with ``_status`` set to
+``missing`` or ``null`` only when the named field is absent or null:
+
+.. code:: python
+
+    >>> jmespath.search("mark_missing(@, 'items')", orders)
+    [{'order_id': 'O1', 'items': [{'sku': 'A'}, {'sku': 'B'}]},
+     {'order_id': 'O2', 'items': []},
+     {'order_id': 'O3', '_status': 'missing'},
+     {'order_id': 'O4', 'items': None, '_status': 'null'}]
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 

@@ -346,6 +346,121 @@ class Functions(metaclass=FunctionRegistry):
         else:
             return None
 
+    # Marker keys reserved by the preserving expand functions.
+    STATUS_KEY = '_status'
+    FIELD_KEY = '_field'
+    DETAIL_KEY = '_detail'
+    PARENT_KEY = '_parent'
+    STATUS_MISSING = 'missing'
+    STATUS_NULL = 'null'
+    STATUS_EMPTY = 'empty'
+
+    @signature({'types': ['array']}, {'types': ['expref']})
+    def _func_flat_map(self, arg, expref):
+        # Preserving expand.  Unlike a projection, which silently drops every
+        # parent whose expression resolves to null, each parent element stays
+        # represented in the output:
+        #   * a non-empty detail list yields one row per detail, each carrying
+        #     the full parent path, so two details produce exactly two rows;
+        #   * an empty list/object is kept once with _status "empty";
+        #   * an absent field is marked "missing" and an explicit null "null";
+        #   * any other detail (scalar or single object) yields one row.
+        # No global null padding is inserted to force the row count back up
+        # to the parent count.
+        expanded = []
+        for element in arg:
+            detail = expref.visit(expref.expression, element)
+            if isinstance(detail, list) and detail:
+                expanded.extend(
+                    self._detail_row(element, item) for item in detail)
+            else:
+                expanded.append(self._single_row(element, detail, expref))
+        return expanded
+
+    def _single_row(self, element, detail, expref):
+        if detail is None:
+            field_name = self._field_name(expref.expression)
+            marker = {
+                self.STATUS_KEY: self._null_status(element, field_name),
+            }
+            if field_name is not None:
+                marker[self.FIELD_KEY] = field_name
+            return self._parent_row(element, marker)
+        if detail == [] or detail == {}:
+            return self._parent_row(
+                element, {self.STATUS_KEY: self.STATUS_EMPTY})
+        if isinstance(detail, dict):
+            return self._parent_row(element, detail)
+        return self._parent_row(element, {self.DETAIL_KEY: detail})
+
+    def _detail_row(self, element, detail):
+        # Nested details keep the parent path; non-object details are nested
+        # under _detail instead of being merged into a flat list.
+        if isinstance(detail, dict):
+            return self._parent_row(element, detail)
+        return self._parent_row(element, {self.DETAIL_KEY: detail})
+
+    def _null_status(self, element, field_name):
+        # A field access resolves to null both when the field is absent and
+        # when it holds an explicit null, so inspect the source object to
+        # tell the two cases apart.
+        if (field_name is not None and isinstance(element, dict)
+                and field_name in element):
+            return self.STATUS_NULL
+        return self.STATUS_MISSING
+
+    def _field_name(self, expression):
+        if expression.get('type') == 'field':
+            return expression.get('value')
+        return None
+
+    def _parent_row(self, element, extra):
+        # Build a fresh row that retains the full parent path.  The source
+        # document is never mutated.  Non-object parents are nested under
+        # _parent so the path is still recoverable.
+        row = {}
+        if isinstance(element, dict):
+            row.update(element)
+        else:
+            row[self.PARENT_KEY] = element
+        if isinstance(extra, dict):
+            row.update(extra)
+        return row
+
+    @signature({'types': ['array']}, {'types': ['string']})
+    def _func_mark_missing(self, arg, field_name):
+        # One-to-one audit pass for quality reports.  Every input element is
+        # returned exactly once; _status is added only when the named field is
+        # absent ("missing") or explicitly null ("null").  Elements carrying
+        # a real value come back unmarked, and the array is never padded.
+        marked = []
+        for element in arg:
+            if isinstance(element, dict) and field_name in element:
+                if element[field_name] is None:
+                    marked.append(self._status_row(element, self.STATUS_NULL))
+                else:
+                    marked.append(self._copy_row(element))
+            else:
+                marked.append(
+                    self._status_row(element, self.STATUS_MISSING))
+        return marked
+
+    def _copy_row(self, element):
+        if isinstance(element, dict):
+            row = {}
+            row.update(element)
+            return row
+        return element
+
+    def _status_row(self, element, status):
+        if isinstance(element, dict):
+            row = {}
+            row.update(element)
+        else:
+            row = {self.PARENT_KEY: element}
+        row[self.STATUS_KEY] = status
+        return row
+
     def _create_key_func(self, expref, allowed_types, function_name):
         def keyfunc(x):
             result = expref.visit(expref.expression, x)
